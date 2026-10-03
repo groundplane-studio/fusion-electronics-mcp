@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+spike/scratch/
+*.fbrd
+*.f3z
+*.egg-info/
+build/
+tests/fixtures/_tmp_*
+server/fusion_mcp/addin/FusionElectronicsMCP/.vscode/
+spike/

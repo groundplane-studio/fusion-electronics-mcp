@@ -1,0 +1,61 @@
+{
+  "id": "placeholder-res-0402-10k",
+  "deviceset": "PH_RES_0402",
+  "device": "_10K",
+  "description": "Placeholder chip resistor 10k 0402",
+  "category": "resistor",
+  "prefix": "R",
+  "user_value": false,
+  "package": {
+    "name": "PH_R0402",
+    "smds": [
+      {
+        "name": "1",
+        "x": -0.5,
+        "y": 0,
+        "dx": 0.6,
+        "dy": 0.6,
+        "roundness": 25
+      },
+      {
+        "name": "2",
+        "x": 0.5,
+        "y": 0,
+        "dx": 0.6,
+        "dy": 0.6,
+        "roundness": 25
+      }
+    ],
+    "silk": [],
+    "jlc_native": true
+  },
+  "symbol": {
+    "name": "PH_RES",
+    "pins": [
+      {
+        "name": "1",
+        "pad": "1",
+        "direction": "pas",
+        "side": "left"
+      },
+      {
+        "name": "2",
+        "pad": "2",
+        "direction": "pas",
+        "side": "right"
+      }
+    ]
+  },
+  "attributes": {
+    "VALUE": "10k 1%",
+    "JLCPCB": "C25744",
+    "JLC_PARTS_TYPE": "Basic"
+  },
+  "metadata": {
+    "source": "placeholder",
+    "maintainer": "Groundplane",
+    "link": "",
+    "verified": false,
+    "notes": "Test fixture only. Geometry is generic and the JLC code is unverified; do not order from it."
+  }
+}

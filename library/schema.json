@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/groundplane-studio/fusion-electronics-mcp/library/schema.json",
+  "title": "Library part",
+  "type": "object",
+  "required": ["id", "deviceset", "device", "prefix", "package", "symbol", "attributes", "metadata"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "deviceset": {"type": "string", "description": "Fusion device set name"},
+    "device": {"type": "string", "description": "device (variant) name within the set, may be empty"},
+    "description": {"type": "string"},
+    "category": {"type": "string"},
+    "prefix": {"type": "string"},
+    "user_value": {"type": "boolean", "default": false},
+    "package": {
+      "type": "object",
+      "required": ["name", "smds"],
+      "properties": {
+        "name": {"type": "string"},
+        "smds": {"type": "array", "items": {
+          "type": "object", "required": ["name", "x", "y", "dx", "dy"],
+          "properties": {"name": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"},
+                         "dx": {"type": "number"}, "dy": {"type": "number"},
+                         "roundness": {"type": "integer", "minimum": 0, "maximum": 100},
+                         "rot": {"type": "number"}}}},
+        "silk": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}},
+        "silk_polys": {"type": "array", "items": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}, "minItems": 3}},
+        "silk_circles": {"type": "array", "items": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "r": {"type": "number"}, "filled": {"type": "boolean"}}, "required": ["x", "y", "r"]}},
+        "jlc_native": {"type": "boolean", "description": "adds the layer-114 JLC marker"}
+      }
+    },
+    "symbol": {
+      "type": "object",
+      "required": ["name", "pins"],
+      "properties": {
+        "name": {"type": "string"},
+        "pins": {"type": "array", "items": {
+          "type": "object", "required": ["name", "pad"],
+          "properties": {"name": {"type": "string"}, "pad": {"type": "string"},
+                         "direction": {"enum": ["nc", "in", "out", "io", "oc", "pwr", "pas", "hiz", "sup"]},
+                         "side": {"enum": ["left", "right"]}}}}
+      }
+    },
+    "attributes": {"type": "object", "additionalProperties": {"type": "string"},
+                   "description": "Fusion technology attributes, e.g. JLCPCB, MF, MP, JLC_PARTS_TYPE"},
+    "metadata": {
+      "type": "object",
+      "required": ["source", "maintainer", "verified"],
+      "properties": {"source": {"type": "string"}, "maintainer": {"type": "string"},
+                     "link": {"type": "string"}, "verified": {"type": "boolean"},
+                     "notes": {"type": "string"}}
+    }
+  }
+}

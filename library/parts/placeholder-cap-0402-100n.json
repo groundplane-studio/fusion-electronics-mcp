@@ -1,0 +1,61 @@
+{
+  "id": "placeholder-cap-0402-100n",
+  "deviceset": "PH_CAP_0402",
+  "device": "_100NF",
+  "description": "Placeholder MLCC 100nF 0402",
+  "category": "capacitor",
+  "prefix": "C",
+  "user_value": false,
+  "package": {
+    "name": "PH_C0402",
+    "smds": [
+      {
+        "name": "1",
+        "x": -0.5,
+        "y": 0,
+        "dx": 0.6,
+        "dy": 0.6,
+        "roundness": 25
+      },
+      {
+        "name": "2",
+        "x": 0.5,
+        "y": 0,
+        "dx": 0.6,
+        "dy": 0.6,
+        "roundness": 25
+      }
+    ],
+    "silk": [],
+    "jlc_native": true
+  },
+  "symbol": {
+    "name": "PH_CAP",
+    "pins": [
+      {
+        "name": "1",
+        "pad": "1",
+        "direction": "pas",
+        "side": "left"
+      },
+      {
+        "name": "2",
+        "pad": "2",
+        "direction": "pas",
+        "side": "right"
+      }
+    ]
+  },
+  "attributes": {
+    "VALUE": "100nF 16V",
+    "JLCPCB": "C1525",
+    "JLC_PARTS_TYPE": "Basic"
+  },
+  "metadata": {
+    "source": "placeholder",
+    "maintainer": "Groundplane",
+    "link": "",
+    "verified": false,
+    "notes": "Test fixture only. Geometry is generic and the JLC code is unverified; do not order from it."
+  }
+}

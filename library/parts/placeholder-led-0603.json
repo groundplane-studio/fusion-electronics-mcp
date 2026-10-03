@@ -1,0 +1,67 @@
+{
+  "id": "placeholder-led-0603",
+  "deviceset": "PH_LED_0603",
+  "device": "",
+  "description": "Placeholder LED 0603",
+  "category": "led",
+  "prefix": "D",
+  "user_value": true,
+  "package": {
+    "name": "PH_LED0603",
+    "smds": [
+      {
+        "name": "1",
+        "x": -0.75,
+        "y": 0,
+        "dx": 0.8,
+        "dy": 0.8,
+        "roundness": 25
+      },
+      {
+        "name": "2",
+        "x": 0.75,
+        "y": 0,
+        "dx": 0.8,
+        "dy": 0.8,
+        "roundness": 25
+      }
+    ],
+    "silk": [
+      [
+        -1.4,
+        0.6,
+        -1.4,
+        -0.6
+      ]
+    ],
+    "jlc_native": false
+  },
+  "symbol": {
+    "name": "PH_LED",
+    "pins": [
+      {
+        "name": "A",
+        "pad": "2",
+        "direction": "pas",
+        "side": "left"
+      },
+      {
+        "name": "C",
+        "pad": "1",
+        "direction": "pas",
+        "side": "right"
+      }
+    ]
+  },
+  "attributes": {
+    "JLCPCB": "C2286",
+    "JLC_PARTS_TYPE": "Basic"
+  },
+  "metadata": {
+    "source": "placeholder",
+    "maintainer": "Groundplane",
+    "link": "",
+    "verified": false,
+    "notes": "Test fixture only. Geometry is generic and the JLC code is unverified; do not order from it."
+  }
+}

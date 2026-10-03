@@ -1,0 +1,13 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "addin",
+    "id": "7c1f5e2a-4b3d-4e8f-9a61-2d0c8b5e9f41",
+    "author": "Groundplane",
+    "description": {
+        "": "Local bridge for the Fusion Electronics MCP server (127.0.0.1 only, token-gated, fixed operations)."
+    },
+    "version": "0.12.2",
+    "runOnStartup": true,
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}

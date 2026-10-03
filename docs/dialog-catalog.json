@@ -1,0 +1,177 @@
+{
+  "fusion": "2705.1.15",
+  "probes": [
+    {
+      "probe": "value_fixed_part",
+      "editor": "schematic",
+      "commands": "VALUE 'R2' '1k';",
+      "ms": 1502.5,
+      "dialogs": [
+        {
+          "texts": [
+            "Part 'R2' has no user definable value.\n\nDo you want to change it anyway?"
+          ],
+          "inputs": 0,
+          "pressed": "No",
+          "message_box": true,
+          "buttons": [
+            "Yes",
+            "No"
+          ],
+          "text": "Part 'R2' has no user definable value.  Do you want to change it anyway?"
+        }
+      ],
+      "changed": false
+    },
+    {
+      "probe": "unknown_command",
+      "editor": "schematic",
+      "commands": "FROBNICATE 'R1';",
+      "refused": "command_not_allowed: EAGLE command 'FROBNICATE' is not allowed by the bridge",
+      "dialogs": [],
+      "changed": false
+    },
+    {
+      "probe": "add_unknown_device",
+      "editor": "schematic",
+      "commands": "GRID MM; ADD 'NOPE_DEVICE@NOPE_LIB' 'R50' R0 (60 60);",
+      "ms": 355.7,
+      "dialogs": [],
+      "changed": true,
+      "undone_clean": false
+    },
+    {
+      "probe": "add_duplicate_name",
+      "editor": "schematic",
+      "commands": "GRID MM; ADD 'RES_0603_10K_1%_1/10W@!GPLIB_PASSIVE' 'R1' R0 (60 60);",
+      "ms": 1833.1,
+      "dialogs": [],
+      "changed": true,
+      "undone_clean": true
+    },
+    {
+      "probe": "name_part_to_existing",
+      "editor": "schematic",
+      "commands": "GRID MM; NAME 'R1' (0.0 -20.32);",
+      "ms": 62.4,
+      "dialogs": [],
+      "changed": true,
+      "undone_clean": true
+    },
+    {
+      "probe": "name_nothing_at_point",
+      "editor": "schematic",
+      "commands": "GRID MM; NAME 'XX' (90 90);",
+      "ms": 30.0,
+      "dialogs": [],
+      "changed": false
+    },
+    {
+      "probe": "edit_missing_sheet",
+      "editor": "schematic",
+      "commands": "EDIT .s9;",
+      "ms": 60.9,
+      "dialogs": [],
+      "changed": true,
+      "undone_clean": true
+    },
+    {
+      "probe": "net_from_empty_point",
+      "editor": "schematic",
+      "commands": "GRID MM; NET 'N_FREE' (80 80) (85 80);",
+      "ms": 298.9,
+      "dialogs": [],
+      "changed": true,
+      "undone_clean": true
+    },
+    {
+      "probe": "net_join_two_named_nets",
+      "editor": "schematic",
+      "commands": "GRID MM; NET 'JOIN_A' (-12.7 -20.32) (-12.7 -22.86); NET 'JOIN_B' (0.0 -10.16) (0.0 -7.62); NET (-12.7 -22.86) (0.0 -7.62);",
+      "ms": 1771.4,
+      "dialogs": [
+        {
+          "texts": [
+            "Merge net segment 'SPIKE_A' into given net 'JOIN_B'?"
+          ],
+          "inputs": 0,
+          "pressed": "No",
+          "message_box": true,
+          "buttons": [
+            "Yes",
+            "No"
+          ],
+          "text": "Merge net segment 'SPIKE_A' into given net 'JOIN_B'?"
+        }
+      ],
+      "changed": true,
+      "undone_clean": false
+    },
+    {
+      "probe": "variant_missing",
+      "editor": "schematic",
+      "commands": "GRID MM; PACKAGE '_NOPE_VARIANT' (-12.7 -20.32);",
+      "ms": 63.8,
+      "dialogs": [],
+      "changed": false
+    },
+    {
+      "probe": "delete_part",
+      "editor": "schematic",
+      "commands": "GRID MM; DELETE (-12.7 -20.32);",
+      "ms": 63.6,
+      "dialogs": [],
+      "changed": true,
+      "undone_clean": true
+    },
+    {
+      "probe": "move_unknown_part",
+      "editor": "board",
+      "commands": "GRID MM; MOVE 'NOPE99' (1 1);",
+      "ms": 157.3,
+      "dialogs": [],
+      "changed": false
+    },
+    {
+      "probe": "via_auto_diameter",
+      "editor": "board",
+      "commands": "GRID MM; CHANGE DRILL 0.3; VIA 'VIA_TEST' auto round (2 2);",
+      "ms": 368.3,
+      "dialogs": [],
+      "changed": true,
+      "undone_clean": true
+    },
+    {
+      "probe": "signal_on_linked_board",
+      "editor": "board",
+      "commands": "SIGNAL 'SIG_T' 'R1' '1' 'R2' '1';",
+      "ms": 119.0,
+      "dialogs": [],
+      "changed": false
+    },
+    {
+      "probe": "delete_element_on_board",
+      "editor": "board",
+      "commands": "DELETE 'R1';",
+      "ms": 49.8,
+      "dialogs": [],
+      "changed": false
+    },
+    {
+      "probe": "add_on_linked_board",
+      "editor": "board",
+      "commands": "GRID MM; ADD 'RES_0603_10K_1%_1/10W@!GPLIB_PASSIVE' 'R51' R0 (5 5);",
+      "ms": 192.1,
+      "dialogs": [],
+      "changed": false
+    },
+    {
+      "probe": "wire_unknown_layer",
+      "editor": "board",
+      "commands": "GRID MM; LAYER 77; WIRE 'X' 0.2 (1 1) (2 2);",
+      "ms": 302.6,
+      "dialogs": [],
+      "changed": false
+    }
+  ]
+}

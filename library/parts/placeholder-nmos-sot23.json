@@ -1,0 +1,82 @@
+{
+  "id": "placeholder-nmos-sot23",
+  "deviceset": "PH_NMOS_SOT23",
+  "device": "",
+  "description": "Placeholder N-MOSFET SOT-23",
+  "category": "transistor",
+  "prefix": "Q",
+  "user_value": false,
+  "package": {
+    "name": "PH_SOT23",
+    "smds": [
+      {
+        "name": "1",
+        "x": -0.95,
+        "y": -1.1,
+        "dx": 0.6,
+        "dy": 0.9,
+        "roundness": 25
+      },
+      {
+        "name": "2",
+        "x": 0.95,
+        "y": -1.1,
+        "dx": 0.6,
+        "dy": 0.9,
+        "roundness": 25
+      },
+      {
+        "name": "3",
+        "x": 0.0,
+        "y": 1.1,
+        "dx": 0.6,
+        "dy": 0.9,
+        "roundness": 25
+      }
+    ],
+    "silk": [
+      [
+        -1.5,
+        0.6,
+        1.5,
+        0.6
+      ]
+    ],
+    "jlc_native": false
+  },
+  "symbol": {
+    "name": "PH_NMOS",
+    "pins": [
+      {
+        "name": "G",
+        "pad": "1",
+        "direction": "in",
+        "side": "left"
+      },
+      {
+        "name": "S",
+        "pad": "2",
+        "direction": "pas",
+        "side": "right"
+      },
+      {
+        "name": "D",
+        "pad": "3",
+        "direction": "pas",
+        "side": "right"
+      }
+    ]
+  },
+  "attributes": {
+    "VALUE": "NMOS 30V",
+    "JLCPCB": "C20917",
+    "JLC_PARTS_TYPE": "Basic"
+  },
+  "metadata": {
+    "source": "placeholder",
+    "maintainer": "Groundplane",
+    "link": "",
+    "verified": false,
+    "notes": "Test fixture only. Geometry is generic and the JLC code is unverified; do not order from it."
+  }
+}
