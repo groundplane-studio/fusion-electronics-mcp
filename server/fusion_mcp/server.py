@@ -10,6 +10,7 @@ service tools are stubs.
 from __future__ import annotations
 
 import contextlib
+import xml.etree.ElementTree as ET
 import functools
 import math
 import re
@@ -364,6 +365,7 @@ def _jlc_orientation(snap, refs=None, fetch: bool = False) -> dict:
     from fusion_offline import jlc_orient as J
     from . import easyeda as E
     root = D.read_xml(snap.board_xml)
+    sch_root = D.read_xml(snap.sch_xml) if snap.sch_xml else ET.Element("eagle")
     out = {}
     for el in snap.fab().elements:
         if refs and el.name not in refs:
@@ -381,14 +383,17 @@ def _jlc_orientation(snap, refs=None, fetch: bool = False) -> dict:
             out[el.name] = {"code": code, "error": "not in the EasyEDA cache (check_jlc_orientation with fetch=true)"}
             continue
         pp = J.package_pads(root, el.name)
-        d = J.derive(pp[0] if pp else [], J.easyeda_pads(result))
-        out[el.name] = {"code": code, "derived": d.as_dict() if d else None,
+        ours, easy, used = J.by_function(pp[0] if pp else [], J.pin_names_from_schematic(sch_root, el.name),
+                                         J.easyeda_pads(result), J.easyeda_pin_names(result))
+        d = J.derive(ours, easy)
+        out[el.name] = {"code": code, "matched_by": "pin function" if used else "pad number",
+                        "derived": d.as_dict() if d else None,
                         **({} if d else {"error": "pads could not be matched"})}
     return out
 
 
 def _jlc(apply_orientation: bool = False):
-    snap = _snap(schematic=False)
+    snap = _snap(schematic=apply_orientation)      # pin names come from the schematic
     overrides, review = None, {}
     from_library = {e.name: {k: e.attrs.get(k) for k in ("JLC-ROTATION", "JLC-X-OFFSET", "JLC-Y-OFFSET")}
                     for e in snap.fab().elements
@@ -451,8 +456,10 @@ def check_jlc_orientation(refs: list[str] | None = None, fetch: bool = False) ->
     part's JLCPCB code) and derive the CPL rotation/offset that lines them up: pads matched by name
     (geometry when names differ, flagged ambiguous so a person confirms polarity). fetch=true
     downloads missing footprints from easyeda.com (the only internet access this server makes:
-    cached forever, >= 15 s between requests); otherwise only the local cache is used."""
-    snap = _snap(schematic=False)
+    cached forever, >= 15 s between requests); otherwise only the local cache is used. Pads are
+    matched by pin FUNCTION (K/A, FB/EN...) when both footprints name their pins, so a part whose
+    libraries number pads differently is not turned around."""
+    snap = _snap()
     res = _jlc_orientation(snap, refs, fetch)
     fix = {k: v["derived"] for k, v in res.items() if v.get("derived") and v["derived"]["needs_correction"]}
     return {"parts": res, "corrections": {k: v for k, v in fix.items() if v["trustworthy"]},

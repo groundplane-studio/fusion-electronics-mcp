@@ -353,3 +353,24 @@ class JlcConsensusTest(unittest.TestCase):
         self.assertAlmostEqual(d.dx, 0.0, places=3)
         self.assertEqual(sorted(o for o, _, _ in d.outliers), ["S1", "S2"])
         self.assertFalse(d.trustworthy)
+
+
+class JlcFunctionMatchTest(unittest.TestCase):
+    def test_diode_numbered_differently_is_not_turned_around(self):
+        from fusion_offline import jlc_orient as J
+        ours = [("1", -2.0, 0.0), ("2", 2.0, 0.0)]                 # KiCad SMA: pad 1 = cathode, left
+        easy = [("1", 2.5, 0.0), ("2", -2.5, 0.0)]                 # JLC SMA:   pad 1 = anode, right
+        o, e, used = J.by_function(ours, {"1": "K", "2": "A"}, easy, {"1": "A", "2": "K"})
+        self.assertTrue(used)
+        d = J.derive(o, e)
+        self.assertEqual(d.rotation, 0)                            # cathode stays on the left
+        self.assertAlmostEqual(d.dx, 0.0, places=3)
+
+    def test_pitch_rounding_keeps_mean_fit(self):
+        from fusion_offline import jlc_orient as J
+        ours = [(str(i + 1), -1.137, 0.95 - 0.95 * i) for i in range(3)] + [(str(i + 4), 1.137, -0.95 + 0.95 * i) for i in range(3)]
+        easy = [(str(i + 1), -1.2, 0.95 - 0.95 * i) for i in range(3)] + [(str(i + 4), 1.2, -0.95 + 0.95 * i) for i in range(3)]
+        d = J.derive(ours, easy)
+        self.assertEqual(d.rotation, 0)
+        self.assertAlmostEqual(d.dx, 0.0, places=3)
+        self.assertFalse(d.outliers)

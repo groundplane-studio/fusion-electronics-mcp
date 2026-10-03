@@ -56,16 +56,27 @@ def _ops_source() -> str:
     return _source_cache[1]
 
 
+def _literal(text: str, width: int = 1000) -> str:
+    """A Python string literal for `text`, split over lines of at most ~width chars
+    (adjacent literals concatenate): Fusion's MCP server cut a 10 KB single line
+    (a 50-pin part's build script) and the script failed to parse."""
+    parts = [json.dumps(text[i:i + width]) for i in range(0, len(text), width)] or ['""']
+    return "(\n        " + "\n        ".join(parts) + ")"
+
+
 def build_script(op: str, args: dict, read_only: bool) -> str:
     end = "" if read_only else "\n    _ui.terminateActiveCommand()   # an EAGLE command leaves its tool active"
     return _ops_source() + f'''
+
+_ARGS = {_literal(json.dumps(args))}
+
 
 def run(_context: str):
     global _app, _ui
     _app = adsk.core.Application.get()
     _ui = _app.userInterface
     try:
-        res = {{"ok": True, "result": OPS[{op!r}](json.loads({json.dumps(json.dumps(args))}))}}
+        res = {{"ok": True, "result": OPS[{op!r}](json.loads(_ARGS))}}
     except BridgeError as ex:
         res = {{"ok": False, "error": {{"code": ex.code, "message": str(ex)}}}}{end}
     print({MARK!r} + json.dumps(res, default=str))

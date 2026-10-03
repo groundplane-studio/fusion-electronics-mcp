@@ -238,3 +238,17 @@ class BuiltinTransportTest(unittest.TestCase):
         self.assertNotIn("terminateActiveCommand()   #", r)      # a read must not cancel the person's command
         self.assertIn("export", B.READ_ONLY_OPS)
         self.assertNotIn("run", B.READ_ONLY_OPS)
+
+
+class BuiltinLongArgsTest(unittest.TestCase):
+    def test_long_arguments_are_split_over_short_lines(self):
+        import json as _json
+        from fusion_mcp import builtin as B
+        args = {"script": "PAD 1.5 ROUND R0 'P' (0 0);\n" * 400, "editor": "library"}
+        scr = B.build_script("run_script", args, read_only=False)
+        compile(scr, "s", "exec")
+        tail = scr[scr.index("_ARGS ="):]
+        self.assertLess(max(len(l) for l in tail.splitlines()), 1100)
+        ns = {}
+        exec(tail[:tail.index("\n\n\ndef run")], {"json": _json}, ns)
+        self.assertEqual(_json.loads(ns["_ARGS"]), args)

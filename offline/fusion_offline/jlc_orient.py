@@ -105,6 +105,56 @@ def _eval(pairs, r):
 
 
 CONSENSUS_MM = 0.05
+PITCH_MM = 0.15
+
+
+def easyeda_pin_names(result: dict) -> dict[str, str]:
+    """{pad number: pin name} from the EasyEDA symbol (its pin numbers are the
+    footprint's pad numbers)."""
+    out = {}
+    for shape in ((result.get("dataStr") or {}).get("shape") or []):
+        if not shape.startswith("P~"):
+            continue
+        sec = shape.split("^^")
+        try:
+            num = str(sec[0].split("~")[3])
+            f = sec[3].split("~") if len(sec) > 3 else []
+            out[num] = f[4] if len(f) > 4 and f[4] else num
+        except IndexError:
+            continue
+    return out
+
+
+def by_function(ours, our_names: dict, easy, easy_names: dict):
+    """Relabel both pad lists with pin FUNCTION names when both sides name at least
+    two pins by function: pad numbers can mean different pins (an SS54 is pad 1 =
+    cathode in KiCad's SMA, pad 1 = anode in JLC's), and matching by number would
+    then turn the part around. Returns (ours, easy, used)."""
+    def fn(n):
+        return n and not n.isdigit() and n.upper() not in ("NC", "~")
+    on = {p: our_names.get(p, p) for p, _, _ in ours}
+    en = {p: easy_names.get(p, p) for p, _, _ in easy}
+    shared = {v for v in on.values() if fn(v)} & {v for v in en.values() if fn(v)}
+    if len(shared) < 2 or len(set(on.values())) != len(on) or len(set(en.values())) != len(en):
+        return ours, easy, False
+    return ([(on[p], x, y) for p, x, y in ours], [(en[p], x, y) for p, x, y in easy], True)
+
+
+def pin_names_from_schematic(sch_root: ET.Element, ref: str) -> dict[str, str]:
+    """{pad: pin name} for a part, from the schematic's device connects."""
+    part = next((q for q in sch_root.iter("part") if q.get("name") == ref), None)
+    if part is None:
+        return {}
+    for lib in sch_root.iter("library"):
+        if lib.get("name") != part.get("library"):
+            continue
+        for ds in lib.iter("deviceset"):
+            if ds.get("name") != part.get("deviceset"):
+                continue
+            for dv in ds.iter("device"):
+                if (dv.get("name") or "") == (part.get("device") or ""):
+                    return {pad: c.get("pin") for c in dv.iter("connect") for pad in (c.get("pad") or "").split()}
+    return {}
 
 
 def _consensus(pairs, r):
@@ -203,7 +253,12 @@ def derive(ours: list[tuple[str, float, float]], easy: list[tuple[str, float, fl
         names = [(n, lut.get((round(b[0], 4), round(b[1], 4)), "?")) for (n, _, _), (a, b) in zip(ours, pairs)]
     if len(pairs) >= 2:
         mx, my, agree, out, offs = _consensus(pairs, best.rotation)
-        if agree >= max(2, len(pairs) // 2):
+        # all pads within PITCH_MM of the mean fit: the footprints differ only in pad pitch
+        # rounding (KiCad vs EasyEDA TSOT-23-6 rows 2.27 vs 2.4 mm), keep the mean fit
+        cx = sum(o[0] for o in offs) / len(offs)
+        cy = sum(o[1] for o in offs) / len(offs)
+        worst = max(math.hypot(o[0] - cx, o[1] - cy) for o in offs)
+        if worst > PITCH_MM and agree >= max(2, len(pairs) // 2):
             best.dx, best.dy = round(mx, 4), round(my, 4)
             best.agreeing_pads = agree
             best.outliers = [(names[i][0], names[i][1], (offs[i][0] - mx, offs[i][1] - my)) for i in out]
