@@ -209,6 +209,11 @@ same correction on the part in your library (`JLC-ROTATION`, `JLC-X-OFFSET`,
 ## Safety and privacy
 
 - **No telemetry.** The server talks to Fusion on 127.0.0.1 only.
+- **The add-in only does design edits.** It listens on 127.0.0.1 only, answers
+  only requests carrying the per-session token it writes to your user folder,
+  and runs only Fusion design commands from a fixed list (no `RUN`, `SCRIPT`,
+  `SYSTEM`, file or export commands), so an agent cannot use it to run programs
+  or reach files outside the design.
 - **One exception, on request**: `check_jlc_orientation` with `fetch=true`
   downloads footprints from easyeda.com (cached forever, at least 15 s between
   requests). Nothing else leaves your machine. The service tools
