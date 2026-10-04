@@ -14,7 +14,8 @@ We aim to reply within a week and to fix confirmed problems in the next release.
 - The server talks to Fusion through the bundled add-in on 127.0.0.1, behind a
   per-session token stored in your user folder. The add-in runs only design
   commands from a fixed list (`ALLOWED_VERBS` in the add-in); it has no command
-  that runs scripts, ULPs or programs.
+  that runs scripts, ULPs or programs. The one local file it reads is a STEP
+  model named in `attach_3d_model`, imported into your Fusion project.
 - The only internet access is `check_jlc_orientation` with `fetch=true`, which
   downloads footprints from easyeda.com.
 - MCP tools act with your permissions in Fusion: an agent connected to this

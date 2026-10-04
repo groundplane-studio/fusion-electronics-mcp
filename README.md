@@ -212,8 +212,9 @@ same correction on the part in your library (`JLC-ROTATION`, `JLC-X-OFFSET`,
 - **The add-in only does design edits.** It listens on 127.0.0.1 only, answers
   only requests carrying the per-session token it writes to your user folder,
   and runs only Fusion design commands from a fixed list (no `RUN`, `SCRIPT`,
-  `SYSTEM`, file or export commands), so an agent cannot use it to run programs
-  or reach files outside the design.
+  `SYSTEM`, file or export commands), so an agent cannot use it to run
+  programs. The one local file it reads is a STEP model you name for
+  `attach_3d_model`, which it imports into your Fusion project.
 - **One exception, on request**: `check_jlc_orientation` with `fetch=true`
   downloads footprints from easyeda.com (cached forever, at least 15 s between
   requests). Nothing else leaves your machine. The service tools
