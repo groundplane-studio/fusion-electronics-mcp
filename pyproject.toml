@@ -20,6 +20,7 @@ fusion-electronics-mcp = "fusion_mcp.server:main"
 
 [project.urls]
 Homepage = "https://github.com/groundplane-studio/fusion-electronics-mcp"
+"Ground Plane Studio" = "https://groundplanestudio.com/"
 
 [tool.setuptools.packages.find]
 where = ["offline", "server"]

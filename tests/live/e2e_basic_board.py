@@ -15,7 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 import os
 # a library with variant-based passives (device RES_0603_10K_1%_1/10W); set to yours
-PASSIVES = os.environ.get("FUSION_MCP_TEST_PASSIVES", "!GPLIB_PASSIVE")
+PASSIVES = os.environ.get("FUSION_MCP_TEST_PASSIVES", "GPLIB_PASSIVE")
 
 from fusion_mcp import server as S
 

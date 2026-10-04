@@ -146,9 +146,9 @@ add them to a design from the Library Manager. Then point the server's schematic
 tools at the frames and power symbols:
 
 ```
-FUSION_MCP_SHEET_FRAME=FRAME_B_L@!GPLIB_SCHEMATIC
-FUSION_MCP_GROUND_SYMBOL=GND_EARTH@!GPLIB_SCHEMATIC
-FUSION_MCP_POWER_SYMBOL=12V@!GPLIB_SCHEMATIC
+FUSION_MCP_SHEET_FRAME=FRAME_B_L@GPLIB_SCHEMATIC
+FUSION_MCP_GROUND_SYMBOL=GND_EARTH@GPLIB_SCHEMATIC
+FUSION_MCP_POWER_SYMBOL=12V@GPLIB_SCHEMATIC
 ```
 
 Any library works: these settings only name the devices to use.
@@ -270,6 +270,13 @@ python -m unittest discover -s tests
 
 `docs/architecture.md` explains how the server, Fusion and the add-in fit
 together. `tests/live/` holds scripts that drive a running Fusion.
+
+## About
+
+Made by [Ground Plane Studio](https://groundplanestudio.com/), a hardware
+development team: industrial design, electronics, firmware and manufacturing,
+from concept to production. Want a board designed, reviewed or brought to
+production? [Get in touch](https://groundplanestudio.com/contact).
 
 ## License
 
