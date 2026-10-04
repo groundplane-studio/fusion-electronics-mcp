@@ -57,6 +57,17 @@ class Library:
                         p = Part(json.load(f))
                     self.parts[p.id] = p
 
+    def add(self, data: dict, overwrite: bool = False) -> str:
+        """Save a part definition as <id>.json in the library folder; returns the path."""
+        os.makedirs(self.directory, exist_ok=True)
+        path = os.path.join(self.directory, f"{data['id']}.json")
+        if os.path.exists(path) and not overwrite:
+            raise FileExistsError(f"part {data['id']!r} already exists ({path}); pass overwrite=true to replace it")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        self.parts[data["id"]] = Part(data)
+        return path
+
     def search(self, query: str, limit: int = 20) -> list[dict]:
         terms = [t for t in query.lower().split() if t]
         hits = []
@@ -108,6 +119,22 @@ def build_script(part: Part) -> str:
     if pkg.get("jlc_native"):
         L += [f"LAYER {MARKER_LAYER} JLC_FOOTPRINT;", "CHANGE SIZE 0.6;", "TEXT 'JLC' R0 (0 0);"]
 
+    from . import std_symbols as SS
+    # two-pin passives always get the library's standard symbol (std_symbols), whatever the
+    # source drew; "style": false in the part keeps the part's own symbol
+    style = sym.get("style")
+    if style is None:
+        style = SS.infer_style(d)
+    if style:
+        # a standard two-pin symbol: 7.62 mm, the anode / + pin on the left
+        sym = {**sym, "style": style}
+        lp, rp = SS.pin_order(sym["style"], sym["pins"])
+        plen = SS.styles()[sym["style"]]["pin_length"]
+        L += [f"EDIT {q(sym['name'] + '.sym')};",
+              f"PIN {q(lp['name'])} {lp.get('direction', 'pas')} {plen} R0 (0 0);",
+              f"PIN {q(rp['name'])} {rp.get('direction', 'pas')} {plen} R180 (7.62 0);",
+              "CHANGE VISIBLE OFF (0 0);", "CHANGE VISIBLE OFF (7.62 0);"] + SS.art_commands(sym["style"])
+        return _device_part(L, d, sym, pkg, q)
     left = [p for p in sym["pins"] if p.get("side", "left") == "left"]
     right = [p for p in sym["pins"] if p.get("side") == "right"]
     rows = max(len(left), len(right), 1)
@@ -120,7 +147,10 @@ def build_script(part: Part) -> str:
             L.append(f"PIN {q(p['name'])} {p.get('direction', 'pas')} short {rot} ({n(x)} {n(y)});")
     L += ["CHANGE SIZE 1.778;", "LAYER 95;", f"TEXT '>NAME' R0 (-5.08 {n(hh + 0.5)});",
           "LAYER 96;", f"TEXT '>VALUE' R0 (-5.08 {n(-hh - 2.3)});"]
+    return _device_part(L, d, sym, pkg, q)
 
+
+def _device_part(L: list, d: dict, sym: dict, pkg: dict, q) -> str:
     L += [f"EDIT {q(d['deviceset'] + '.dev')};", f"PREFIX {q(d['prefix'])};",
           f"VALUE {'ON' if d.get('user_value') else 'OFF'};",
           f"ADD {q(sym['name'])} 'G$1' NEXT 0 (0 0);",

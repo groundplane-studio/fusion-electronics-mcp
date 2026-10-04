@@ -176,10 +176,134 @@ EXPECTED_TOOLS = {
     "new_sheet", "set_part_variant", "set_part_value", "move_part", "rotate_part", "add_via", "add_trace", "route_pair",
     "set_board_outline", "add_hole", "add_text", "rip_up", "add_pour", "list_pours", "set_pour_thermals", "add_keepout",
     "stitch_vias", "fanout_pad", "clean_vias", "remove_stubs", "autoroute", "routing_status", "render_board",
-    "score_placement", "suggest_placement_moves", "import_placement_from_kicad", "import_netlist_from_kicad", "undo", "save_design",
-    "search_library", "get_library_part", "insert_library_part", "close_library", "update_from_libraries", "attach_3d_model",
+    "score_placement", "suggest_placement_moves", "import_placement_from_kicad", "import_routing_from_kicad", "route_trace", "route_net", "ground_vias", "route_close", "place_clusters", "lay_bus", "route_remaining", "import_netlist_from_kicad", "undo", "save_design",
+    "search_library", "get_library_part", "insert_library_part", "close_library", "update_from_libraries", "attach_3d_model", "push_3d", "check_3d_models", "list_design_rules", "create_library_part",
     "request_design_review", "get_assembly_quote",
 }
+
+
+class ThreeDCheckTest(unittest.TestCase):
+    """3D model guards: a part on the wrong side is flagged; a replacement model gets a new name."""
+
+    def test_wrong_side_is_flagged(self):
+        from unittest import mock
+        from fusion_mcp import server as S
+        res = {"board_z_mm": [0.0, 1.6], "parts": [
+            {"occurrence": "MINIFIT:J3", "z_mm": [-11.2, 5.1]},      # hangs below: wrong
+            {"occurrence": "MINIFIT:J4", "z_mm": [-3.5, 14.4]},      # pins through, body above: right
+            {"occurrence": "SW:SW1", "z_mm": [-3.0, 1.6]}]}          # mirrored part below: right
+        board = b"""<eagle><drawing><board><elements><element name="SW1" rot="MR180"/></elements></board></drawing></eagle>"""
+        with mock.patch.object(S, "_snap", return_value=mock.Mock(board_xml=board)):
+            out = S._side_check(res)
+        self.assertEqual([w["part"] for w in out["wrong_side"]], ["MINIFIT:J3"])
+
+    def test_replacement_model_gets_a_new_name(self):
+        from unittest import mock
+        from fusion_mcp import server as S
+        devs = {"devices": [{"device": "D", "package": "PKG", "packages3d": ["PKG", "PKG_V2"]}]}
+        with mock.patch.object(S.session.bridge, "call", return_value=devs):
+            self.assertEqual(S._next_3d_name("PKG"), "PKG_V3")
+        with mock.patch.object(S.session.bridge, "call", return_value={"devices": []}):
+            self.assertIsNone(S._next_3d_name("PKG"))
+
+
+class InferStyleTest(unittest.TestCase):
+    """Two-pin passives from any source get the library's standard symbol."""
+
+    def test_rules(self):
+        from fusion_mcp import std_symbols as SS
+        two = lambda a, b: {"pins": [{"name": a, "pad": "1"}, {"name": b, "pad": "2"}]}
+        cases = [({"prefix": "R", "symbol": two("1", "2")}, "res"),
+                 ({"prefix": "C", "symbol": two("1", "2")}, "cap"),
+                 ({"prefix": "C", "description": "Aluminium electrolytic 100uF", "symbol": two("+", "-")}, "cap_pol"),
+                 ({"prefix": "D", "description": "Schottky 40 V", "symbol": two("K", "A")}, "schottky"),
+                 ({"prefix": "D", "description": "LED 0603 red", "symbol": two("K", "A")}, "led"),
+                 ({"prefix": "D", "description": "diode", "symbol": two("1", "2")}, None),     # anode unknown
+                 ({"prefix": "FB", "symbol": two("1", "2")}, "ferrite"),
+                 ({"prefix": "U", "symbol": two("1", "2")}, None),
+                 ({"prefix": "R", "symbol": {"pins": [{"name": n, "pad": n} for n in "123"]}}, None)]
+        for part, want in cases:
+            self.assertEqual(SS.infer_style(part), want, part)
+
+
+class TransportTest(unittest.TestCase):
+    """auto uses the add-in when it is running; the built-in server refuses what it cannot do."""
+
+    def test_auto_prefers_a_running_addin(self):
+        import json, os, socket, tempfile
+        from unittest import mock
+        from fusion_mcp import bridge as B
+        srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        with tempfile.TemporaryDirectory() as d:
+            info = os.path.join(d, "bridge.json")
+            json.dump({"port": srv.getsockname()[1], "token": "t", "pid": 1, "protocol": 1}, open(info, "w"))
+            with mock.patch.dict(os.environ, {"FUSION_MCP_TRANSPORT": "auto"}),                     mock.patch.object(B._BUILTIN, "available", return_value=True):
+                self.assertEqual(B.Bridge(info_path=info).transport(), "addin")
+                srv.close()
+                self.assertEqual(B.Bridge(info_path=info).transport(), "builtin")
+
+    def test_builtin_refuses_saves(self):
+        import os
+        from unittest import mock
+        from fusion_mcp import bridge as B
+        with mock.patch.dict(os.environ, {"FUSION_MCP_TRANSPORT": "builtin"}):
+            with self.assertRaises(B.BridgeOpError) as cm:
+                B.Bridge(watch_dialogs=False, keep_focus=False).call("save", {})
+        self.assertEqual(cm.exception.code, "needs_addin")
+
+
+class RuleLibraryTest(unittest.TestCase):
+    def test_bundled_rule_sets(self):
+        from fusion_mcp import rules_lib
+        sets = {r["name"]: r for r in rules_lib.catalog()}
+        four = next(r for n, r in sets.items() if n.startswith("JLC04161H-3313A"))
+        self.assertAlmostEqual(four["board_thickness_mm"], 1.578, places=3)
+        self.assertEqual(four["rules"]["copper_to_edge"], "0.3mm")
+        self.assertTrue(all(r["stackup_file"] for r in sets.values()))
+        self.assertTrue(any(r["copper_layers"] == 2 for r in sets.values()))
+        self.assertEqual([d["er"] for d in four["dielectrics"]], [4.1, 4.6, 4.1])     # JLC's 3313 and core
+        six = [r for r in sets.values() if r["copper_layers"] == 6]
+        self.assertGreaterEqual(len(six), 14)
+        self.assertTrue(all(1.3 < r["board_thickness_mm"] < 1.8 for r in six))
+
+
+class EasyedaSpacingTest(unittest.TestCase):
+    def test_requests_are_spaced_across_processes(self):
+        import os, tempfile, time
+        from unittest import mock
+        from fusion_mcp import easyeda as E
+
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b"{}"
+        with tempfile.TemporaryDirectory() as d,                 mock.patch.dict(os.environ, {"FUSION_MCP_EASYEDA_CACHE": d}),                 mock.patch.object(E, "MIN_INTERVAL_S", 0.4), mock.patch.object(E.random, "uniform", return_value=0.0),                 mock.patch.object(E.urllib.request, "urlopen", return_value=Resp()):
+            E.polite_get("https://easyeda.com/x")
+            E._last = 0.0                      # as if another process made that request
+            t = time.time()
+            E.polite_get("https://easyeda.com/y")
+            self.assertGreaterEqual(time.time() - t, 0.35)   # waited on the shared clock file
+
+
+class CreatePartTest(unittest.TestCase):
+    def test_kicad_footprint_to_library_part(self):
+        import json, os, tempfile
+        from unittest import mock
+        from fusion_mcp import server as S, library as L
+        fp = """(footprint "R_0603" (layer "F.Cu")
+  (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask"))
+  (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask")))"""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "R_0603.kicad_mod")
+            open(path, "w").write(fp)
+            with mock.patch.object(S, "library", L.Library(os.path.join(d, "parts"))):
+                r = S.create_library_part(path, "res-0603-10k", "RES_0603", "R", "10k", jlc_code="c25804",
+                                          manufacturer="UNI-ROYAL", mpn="0603WAF1002T5E")
+                self.assertEqual((r["pads"], r["symbol_style"]), (2, "res"))
+                saved = json.load(open(r["file"]))
+                self.assertEqual(saved["attributes"]["JLCPCB"], "C25804")
+                with self.assertRaises(FileExistsError):
+                    S.create_library_part(path, "res-0603-10k", "RES_0603", "R", "10k")
 
 
 class ToolListTest(unittest.TestCase):
@@ -252,3 +376,12 @@ class BuiltinLongArgsTest(unittest.TestCase):
         ns = {}
         exec(tail[:tail.index("\n\n\ndef run")], {"json": _json}, ns)
         self.assertEqual(_json.loads(ns["_ARGS"]), args)
+
+
+class SplitSettingsTest(unittest.TestCase):
+    def test_settings_run_outside_the_grouped_write(self):
+        from fusion_mcp.session import split_settings
+        pre, body, post = split_settings("GRID MM; SET WIRE_BEND 2; WIRE 'A' 0.25 (0 0) (1 1); SET WIRE_BEND 1; RATSNEST;")
+        self.assertEqual(pre, "SET WIRE_BEND 2;")
+        self.assertEqual(post, "SET WIRE_BEND 1;")
+        self.assertNotIn("SET", body)

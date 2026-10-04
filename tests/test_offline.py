@@ -200,7 +200,8 @@ class KicadPlacementTest(unittest.TestCase):
         self.assertEqual((r["parts"]["R1"]["x_mm"], r["parts"]["R1"]["y_mm"], r["parts"]["R1"]["angle"]), (5.0, 25.0, 90.0))
         sw = r["parts"]["SW1"]
         self.assertEqual((sw["x_mm"], sw["y_mm"], sw["angle"], sw["bottom"]), (10.0, 5.0, 180.0, True))
-        self.assertEqual(r["parts"]["C1"]["angle"], 90.0)        # bottom 270 -> mirrored 90
+        # bottom 270 -> mirrored 180 - 270 = 270 (pcbnew: a bottom part at 90 is Fusion MR90)
+        self.assertEqual(r["parts"]["C1"]["angle"], 270.0)
 
 
 class PlacementTest(unittest.TestCase):
@@ -374,3 +375,318 @@ class JlcFunctionMatchTest(unittest.TestCase):
         self.assertEqual(d.rotation, 0)
         self.assertAlmostEqual(d.dx, 0.0, places=3)
         self.assertFalse(d.outliers)
+
+
+class BlockPlanTest(unittest.TestCase):
+    """sch_plan: supply-named rails, decaps to the IC they sit at, spare pins labelled."""
+
+    def test_rules(self):
+        from fusion_offline import sch_plan as SP
+        p2 = lambda xy: {"footprint": "x", "value": "", "pads": ["1", "2"], "xy": xy}
+        parts = {"U1": {"footprint": "x", "value": "", "pads": ["1", "2", "3"], "xy": (0, 0), "pad_xy": {"1": (-1, 0)}},
+                 "U2": {"footprint": "x", "value": "", "pads": ["1", "2"], "xy": (10, 0), "pad_xy": {"1": (9, 0)}},
+                 "C1": p2((-1.5, 1)), "C2": p2((9.5, 1)), "J1": {"footprint": "x", "value": "", "pads": ["1", "2"], "xy": (20, 0)}}
+        nets = {"3V3_AUX": [("U1", "1"), ("U2", "1"), ("C1", "1"), ("C2", "1")],
+                "GND": [("U1", "2"), ("U2", "2"), ("C1", "2"), ("C2", "2"), ("J1", "2")],
+                "GPIO_SPARE": [("J1", "1")], "unconnected-(U1-Pad3)": [("U1", "3")]}
+        plan = SP.plan({"parts": parts, "nets": nets})
+        self.assertIn("3V3_AUX", plan["rails"])                   # 4 pins, but named like a supply
+        b = {x["anchor"]: x for x in plan["blocks"]}
+        self.assertEqual(b["U1"]["members"], ["C1"])               # each decap with the IC it sits at
+        self.assertEqual(b["U2"]["members"], ["C2"])
+        self.assertIn("GPIO_SPARE", b["J1"]["external_nets"])      # a spare pin keeps its name
+        self.assertNotIn("unconnected-(U1-Pad3)", b["U1"]["external_nets"])
+
+
+class SchematicBlocksTest(unittest.TestCase):
+    """Block-style schematic: grouping and a layout with every pin wired correctly."""
+
+    @staticmethod
+    def _box(name, pins):
+        from fusion_offline import symbols as S
+        return S.from_part_json({"deviceset": name, "symbol": {"name": name, "pins": [
+            {"name": n, "pad": n, "side": side} for n, side in pins]}})
+
+    def setUp(self):
+        two = [("1", "left"), ("2", "right")]
+        self.geo = {"U1": self._box("REG", [("VIN", "left"), ("EN", "left"), ("FB", "left"),
+                                            ("BST", "right"), ("SW", "right"), ("GND", "right")]),
+                    "J1": self._box("HDR", [("1", "left"), ("2", "left"), ("3", "left")])}
+        for r in ("C1", "C2", "C3", "L1", "R1", "R2", "D1"):
+            self.geo[r] = self._box("P2", two)
+        self.geo["TP1"] = self._box("TP", [("1", "left")])
+        nets = {
+            "VIN": [("U1", "VIN"), ("U1", "EN"), ("C1", "1"), ("J1", "1")],
+            "GND": [("U1", "GND"), ("C1", "2"), ("C2", "2"), ("D1", "2"), ("J1", "3")] + [(f"X{i}", "1") for i in range(6)],
+            "BST": [("U1", "BST"), ("C3", "1")],
+            "SW": [("U1", "SW"), ("C3", "2"), ("L1", "1")],
+            "VOUT": [("L1", "2"), ("C2", "1"), ("R1", "1"), ("U1", "FB"), ("TP1", "1")] + [(f"Y{i}", "1") for i in range(6)],
+            "LED_A": [("R1", "2"), ("D1", "1")],
+            "SIG": [("J1", "2"), ("R2", "2")],
+            "VOUT2": [],
+        }
+        nets["VOUT"].append(("R2", "1"))
+        parts = {r: {"footprint": "x", "value": r, "pads": sorted({p for n, pp in nets.items() for rr, p in pp if rr == r})}
+                 for r in self.geo}
+        for i in range(6):
+            parts[f"X{i}"] = {"footprint": "x", "value": "", "pads": ["1"]}
+            parts[f"Y{i}"] = {"footprint": "x", "value": "", "pads": ["1"]}
+        self.nl = {"parts": parts, "nets": {k: v for k, v in nets.items() if v}}
+
+    def test_grouping(self):
+        from fusion_offline import sch_plan as SP
+        plan = SP.plan({"parts": {r: p for r, p in self.nl["parts"].items() if r in self.geo},
+                        "nets": self.nl["nets"]})
+        blocks = {b["anchor"]: b for b in plan["blocks"]}
+        self.assertEqual(set(blocks["U1"]["members"]), {"C1", "C2", "C3", "D1", "L1", "R1", "TP1"})
+        self.assertEqual(blocks["J1"]["members"], ["R2"])           # pull-up goes with the header
+        self.assertEqual(blocks["U1"]["owned_rails"], ["VOUT"])     # the inductor makes VOUT
+
+    def test_layout_wires_every_pin(self):
+        from fusion_offline import sch_layout as L, sch_plan as SP
+        parts = {r: p for r, p in self.nl["parts"].items() if r in self.geo}
+        nl = {"parts": parts, "nets": {n: [x for x in v if x[0] in parts] for n, v in self.nl["nets"].items()}}
+        plan = SP.plan(nl)
+        rails_all = SP.rails(self.nl["nets"])
+        pad_net = {(r, p): n for n, pp in nl["nets"].items() for r, p in pp}
+        sup = {"gnd": self._box("GNDSYM", [("GND", "left")]), "bar": self._box("BAR", [("VDD", "left")])}
+        for b in plan["blocks"]:
+            refs = {b["anchor"], *b["members"]}
+            owned = {"VOUT"} if b["anchor"] == "U1" else set()
+            ctx = L.Ctx(self.geo, pad_net, {}, refs, b["anchor"], {"GND"}, rails_all, owned,
+                        set(b["external_nets"]), sup)
+            d = L.layout_block(ctx)
+            self.assertEqual(set(d.parts), refs, b["anchor"])
+            c = L.check(d, self.geo, pad_net, refs, sup)
+            mine = {k: v for k, v in c.items() if k in ("wrong", "missing", "shorts", "pin_on_wire",
+                                                        "wire_touch", "unlinked") and v}
+            self.assertEqual(mine, {}, b["anchor"])
+
+
+class StandardSymbolsTest(unittest.TestCase):
+    """Two-pin symbols to the 7.62 mm standard without changing their pins' names."""
+
+    def test_resistor_keeps_artwork_size_and_moves_pins(self):
+        import xml.etree.ElementTree as ET
+        from fusion_mcp import std_symbols as SS
+        sym = ET.fromstring(
+            '<symbol name="RES"><pin name="P$1" x="10.16" y="0" length="short" rot="R180"/>'
+            '<pin name="P$2" x="0" y="0" length="short"/>'
+            '<wire x1="2.54" y1="0" x2="3.81" y2="1" width="0.15" layer="94"/>'
+            '<wire x1="3.81" y1="1" x2="7.62" y2="0" width="0.15" layer="94"/>'
+            '<text x="0" y="5.08" size="1.524" layer="95">&gt;NAME</text></symbol>')
+        script, exp = SS.standardise(sym)
+        self.assertEqual(exp["pins"], {"P$2": (0.0, 0.0), "P$1": (7.62, 0.0)})
+        self.assertIn("CHANGE LENGTH POINT", script)           # 5.08 mm of artwork: point pins + leads
+        self.assertNotIn("DELETE (0 0)", script)                # pins are moved, never deleted
+        xml = exp["xml"]
+        xs = [float(w.get(k)) for w in xml.iter("wire") for k in ("x1", "x2")]
+        self.assertAlmostEqual(min(xs), 0.0); self.assertAlmostEqual(max(xs), 7.62)
+        self.assertEqual(SS.check(xml, exp), [])
+
+    def test_already_standard_is_left_alone(self):
+        import xml.etree.ElementTree as ET
+        from fusion_mcp import std_symbols as SS
+        cap = ET.fromstring('<symbol name="CAP"><pin name="1" x="0" y="0" length="short"/>'
+                            '<pin name="2" x="7.62" y="0" length="short" rot="R180"/></symbol>')
+        self.assertIsNone(SS.standardise(cap))
+
+    def test_styled_library_part_puts_anode_left(self):
+        from fusion_offline import symbols as S
+        g = S.from_part_json({"deviceset": "D", "symbol": {"name": "D", "style": "schottky", "pins": [
+            {"name": "K", "pad": "1", "side": "left"}, {"name": "A", "pad": "2", "side": "right"}]}})
+        self.assertEqual((g.pins["A"].x, g.pins["K"].x), (0.0, 7.62))
+        self.assertEqual(g.pad_pin, {"1": "K", "2": "A"})
+
+
+class RouterTest(unittest.TestCase):
+    """route(): octilinear, around other nets with clearance, ends exactly on the pads."""
+
+    BOARD = """<eagle><drawing><board>
+<plain><wire x1="0" y1="0" x2="40" y2="0" width="0" layer="20"/><wire x1="40" y1="0" x2="40" y2="20" width="0" layer="20"/>
+<wire x1="40" y1="20" x2="0" y2="20" width="0" layer="20"/><wire x1="0" y1="20" x2="0" y2="0" width="0" layer="20"/></plain>
+<libraries><library name="L"><packages><package name="P"><smd name="1" x="0" y="0" dx="1" dy="1" layer="1"/></package></packages></library></libraries>
+<designrules name="r"><param name="mdWireWire" value="0.2mm"/><param name="mdCopperDimension" value="0.3mm"/></designrules>
+<elements><element name="A" library="L" package="P" x="5.03" y="10.07"/><element name="B" library="L" package="P" x="35.11" y="10.02"/></elements>
+<signals><signal name="S"><contactref element="A" pad="1"/><contactref element="B" pad="1"/></signal>
+<signal name="X"><wire x1="20" y1="2" x2="20" y2="18" width="0.5" layer="1"/></signal></signals>
+</board></drawing></eagle>"""
+
+    def test_routes_around_and_lands_on_pads(self):
+        import math
+        import xml.etree.ElementTree as ET
+        from fusion_offline import router as R
+        root = ET.fromstring(self.BOARD)
+        r = R.route(root, "S", (5.03, 10.07), (1,), (35.11, 10.02), (1,), width=0.25, vias=False, step=0.254)
+        self.assertEqual(r.problems, [])
+        (layer, pts), = r.legs
+        self.assertEqual(pts[0], (5.03, 10.07))
+        self.assertEqual(pts[-1], (35.11, 10.02))
+        for a, b in zip(pts[1:-2], pts[2:-1]):           # interior runs are 0/45/90 degrees
+            ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 45
+            self.assertTrue(ang < 0.01 or ang > 44.99, (a, b))
+        self.assertTrue(any(abs(p[1] - 10) > 7.5 for p in pts))   # went round the X trace's end
+
+    def test_uses_a_via_when_blocked(self):
+        import xml.etree.ElementTree as ET
+        from fusion_offline import router as R
+        wall = self.BOARD.replace('y1="2" x2="20" y2="18"', 'y1="-1" x2="20" y2="21"')
+        r = R.route(ET.fromstring(wall), "S", (5.03, 10.07), (1,), (35.11, 10.02), (1,), width=0.25, step=0.254)
+        self.assertEqual(r.problems, [])
+        self.assertEqual(len(r.vias), 2)
+
+    def test_wide_trace_necks_down_at_a_fine_pitch_pad(self):
+        import xml.etree.ElementTree as ET
+        from fusion_offline import router as R
+        # a SOT-23-style pin between two other-net pins 0.95 mm away: a 1.2 mm trace cannot leave it
+        board = self.BOARD.replace('<package name="P">', '<package name="Q"><smd name="1" x="0" y="0" dx="1.3" dy="0.6" layer="1"/></package><package name="P">')
+        board = board.replace('<element name="A" library="L" package="P" x="5.03" y="10.07"/>',
+                              '<element name="A" library="L" package="Q" x="5" y="10"/>'
+                              '<element name="N1" library="L" package="Q" x="5" y="10.95"/>'
+                              '<element name="N2" library="L" package="Q" x="5" y="9.05"/>')
+        board = board.replace('<signal name="X"><wire x1="20" y1="2" x2="20" y2="18" width="0.5" layer="1"/></signal>',
+                              '<signal name="Y"><contactref element="N1" pad="1"/><contactref element="N2" pad="1"/></signal>')
+        r = R.route(ET.fromstring(board), "S", (5, 10), (1,), (35.11, 10.02), (1,), width=1.2, vias=False, step=0.127)
+        self.assertEqual(r.problems, [])
+        ws = [w for _, _, w in r.pieces(1.2)]
+        self.assertEqual(ws[0], 0.6)                 # narrow at the pin
+        self.assertIn(1.2, ws)                       # full width once clear of it
+        self.assertEqual(r.legs[0][1][0], (5, 10))
+
+    def test_oblong_pad_is_a_stadium(self):
+        import xml.etree.ElementTree as ET
+        from fusion_offline import stitch as ST
+        board = self.BOARD.replace('<smd name="1" x="0" y="0" dx="1" dy="1" layer="1"/>',
+                                   '<smd name="1" x="0" y="0" dx="1" dy="2" layer="1" roundness="100"/>')
+        obs, _, _ = ST.board_obstacles(ET.fromstring(board))
+        a = next(o for o in obs if o.is_pad and abs(o.data[0] - 5.03) < 1e-6)
+        self.assertEqual(a.kind, "seg")
+        self.assertAlmostEqual(a.distance(5.03, 10.07 + 1.0), 0.0, places=6)   # end cap
+        self.assertAlmostEqual(a.distance(5.03 + 0.5, 10.07), 0.0, places=6)   # side
+        self.assertGreater(a.distance(5.03 + 0.5, 10.07 + 1.0), 0.1)          # no square corner
+
+
+class RouteAllTest(unittest.TestCase):
+    """route_all: several connections, a blocked one gets through by ripping a laid route."""
+
+    def test_does_not_tap_copper_the_goal_is_not_joined_to(self):
+        import xml.etree.ElementTree as ET
+        from fusion_offline import route_all as RA, router as R
+        # a lane of net S that no pin reaches yet, lying between A and B: tapping it is not a connection
+        board = RouterTest.BOARD.replace('<signal name="X"><wire x1="20" y1="2" x2="20" y2="18" width="0.5" layer="1"/></signal>', '')
+        board = board.replace('<contactref element="B" pad="1"/></signal>',
+                              '<contactref element="B" pad="1"/><wire x1="12" y1="10" x2="28" y2="10" width="0.25" layer="1"/></signal>')
+        res = RA.route_all(ET.fromstring(board), [RA.Conn("s", "S", (5.03, 10.07), (1,), (35.11, 10.02), (1,))], vias=False)
+        self.assertEqual(res.failed, {})
+        frag, _ = R.fragment(res.root, "S", (35.11, 10.02))
+        ends = {p for ab in frag for p in ab}
+        self.assertIn((5.03, 10.07), ends)                       # A really reaches B's copper
+
+    def test_rip_up_and_reroute(self):
+        import xml.etree.ElementTree as ET
+        from fusion_offline import route_all as RA
+        board = RouterTest.BOARD.replace('<signal name="X"><wire x1="20" y1="2" x2="20" y2="18" width="0.5" layer="1"/></signal>',
+                                         '<signal name="X"><contactref element="C" pad="1"/><contactref element="D" pad="1"/></signal>')
+        board = board.replace('<element name="B" library="L" package="P" x="35.11" y="10.02"/>',
+                              '<element name="B" library="L" package="P" x="35.11" y="10.02"/>'
+                              '<element name="C" library="L" package="P" x="20" y="1.5"/><element name="D" library="L" package="P" x="20" y="18.5"/>')
+        root = ET.fromstring(board)
+        conns = [RA.Conn("x", "X", (20, 1.5), (1,), (20, 18.5), (1,)), RA.Conn("s", "S", (5.03, 10.07), (1,), (35.11, 10.02), (1,))]
+        res = RA.route_all(root, conns, vias=True)
+        self.assertEqual(res.failed, {})
+        self.assertEqual(set(res.routes), {"x", "s"})
+        # the two nets cross: one of them changes layer to get past the other
+        self.assertTrue(any(r.vias for r in res.routes.values()))
+
+
+class PadFitTest(unittest.TestCase):
+    """import_placement_from_kicad(fit_pads): place a footprint by where its pads must land."""
+
+    PCB = """(kicad_pcb (gr_rect (start 0 0) (end 20 10) (layer "Edge.Cuts"))
+  (footprint "X:SOT" (layer "F.Cu") (at 5 4 90) (property "Reference" "U1")
+    (pad "1" smd rect (at -1 1 90) (size 0.6 1) (layers "F.Cu")) (pad "2" smd rect (at 1 1 90) (size 0.6 1) (layers "F.Cu"))
+    (pad "3" smd rect (at 0 -1 90) (size 0.6 1) (layers "F.Cu")))
+  (footprint "X:SOT" (layer "B.Cu") (at 14 6 30) (property "Reference" "U2")
+    (pad "1" smd rect (at -1 -1 30) (size 0.6 1) (layers "B.Cu")) (pad "2" smd rect (at 1 -1 30) (size 0.6 1) (layers "B.Cu"))
+    (pad "3" smd rect (at 0 1 30) (size 0.6 1) (layers "B.Cu"))))"""
+
+    def test_pads_in_fusion_frame(self):
+        from fusion_offline import kicad_pcb as KP
+        p = KP.read_pads(self.PCB)
+        # U1 at (5, 4) turned 90 CCW: local (-1, 1) (y down) -> board (5 + 1, 4 + 1) in KiCad -> Fusion y = 10 - 5
+        self.assertEqual(p["U1"]["pads"]["1"], (6.0, 5.0))
+        self.assertTrue(p["U2"]["bottom"])
+
+    def test_fit_finds_a_turned_footprint_and_a_mirrored_one(self):
+        import math
+        from fusion_offline import kicad_pcb as KP
+        from fusion_offline.stitch import _xf
+        pads = KP.read_pads(self.PCB)
+        # a Fusion footprint of the same part (KiCad's, y up: 1 (-1, -1), 2 (1, -1), 3 (0, 1)),
+        # turned 180 degrees and with its origin moved
+        local = {"1": (1.5, 1.0), "2": (-0.5, 1.0), "3": (0.5, -1.0)}
+        for ref in ("U1", "U2"):
+            f = KP.fit_pose(local, pads[ref]["pads"], pads[ref]["bottom"])
+            self.assertLess(f["worst_mm"], 1e-6)
+            self.assertEqual(f["mirror"], ref == "U2")
+            for n, (px, py) in local.items():
+                x, y = _xf(px, py, f["x_mm"], f["y_mm"], f["angle"], f["mirror"])
+                self.assertLess(math.dist((x, y), pads[ref]["pads"][n]), 1e-3)
+
+
+class SmoothTest(unittest.TestCase):
+    def test_staircase_becomes_one_run(self):
+        import xml.etree.ElementTree as ET
+        from fusion_offline import router as R
+        root = ET.fromstring(RouterTest.BOARD.replace('y1="2" x2="20" y2="18"', 'y1="2" x2="20" y2="3"'))
+        G = R.Grid(root, "S", 0.25, None, 0.127, (5.03, 10.07))
+        stair = [(5.0, 10.0), (6.0, 10.0), (6.5, 10.5), (7.5, 10.5), (8.0, 11.0), (12.0, 11.0)]
+        out = R._smooth(G, 1, stair)
+        self.assertLess(len(out), len(stair))
+        self.assertEqual((out[0], out[-1]), (stair[0], stair[-1]))
+        self.assertTrue(all(R._octi(a, b) for a, b in zip(out, out[1:])))
+
+
+class BusTest(unittest.TestCase):
+    def test_lanes_offset_and_trimmed(self):
+        import xml.etree.ElementTree as ET
+        from fusion_offline import bus as BU
+        root = ET.fromstring(RouterTest.BOARD.replace('y1="2" x2="20" y2="18"', 'y1="19" x2="20.5" y2="19"'))
+        plan = BU.plan_bus(root, ["A", "B"], [(30, 6), (8, 6)], 0.8, 0.25, 16,
+                           {"A": [(28, 9), (10, 9)], "B": [(20, 9), (12, 9)]})
+        self.assertEqual(plan["problems"], [])
+        a, b = plan["lanes"]
+        self.assertEqual({p[1] for p in a["points"]}, {6.0})
+        self.assertEqual({round(p[1], 3) for p in b["points"]}, {5.2})          # 0.8 to the left of travel
+        self.assertLess(max(p[0] for p in b["points"]), max(p[0] for p in a["points"]))   # trimmed to its pins
+
+
+class ClusterPlaceTest(unittest.TestCase):
+    """place_clusters' solver: a pull-up lands on its pin's escape line, pin end toward the pin."""
+
+    BOARD = """<eagle><drawing><board>
+<plain><wire x1="0" y1="0" x2="40" y2="0" width="0" layer="20"/><wire x1="40" y1="0" x2="40" y2="30" width="0" layer="20"/>
+<wire x1="40" y1="30" x2="0" y2="30" width="0" layer="20"/><wire x1="0" y1="30" x2="0" y2="0" width="0" layer="20"/></plain>
+<libraries><library name="L"><packages>
+<package name="IC"><smd name="1" x="-2" y="1" dx="1" dy="0.5" layer="1"/><smd name="2" x="-2" y="-1" dx="1" dy="0.5" layer="1"/>
+<smd name="3" x="2" y="0" dx="1" dy="0.5" layer="1"/></package>
+<package name="R"><smd name="1" x="-0.75" y="0" dx="0.8" dy="0.9" layer="1"/><smd name="2" x="0.75" y="0" dx="0.8" dy="0.9" layer="1"/></package>
+</packages></library></libraries>
+<elements><element name="U1" library="L" package="IC" x="20" y="15"/><element name="R1" library="L" package="R" x="5" y="5"/></elements>
+<signals><signal name="SIG"><contactref element="U1" pad="1"/><contactref element="R1" pad="2"/></signal>
+<signal name="VCC"><contactref element="U1" pad="3"/><contactref element="R1" pad="1"/></signal></signals>
+</board></drawing></eagle>"""
+
+    def test_pullup_on_escape_line(self):
+        import xml.etree.ElementTree as ET
+        from fusion_offline import cluster_place as CP
+        root = ET.fromstring(self.BOARD)
+        P = CP.solve(root, [{"anchor": "U1", "members": ["R1"]}], rails={"VCC"})
+        self.assertIn("R1", P.moves)
+        parts, _ = CP.read_parts(CP.applied(root, P))
+        r1 = parts["R1"]
+        near = r1.to_board(*r1.pads["2"][:2])      # the SIG pad
+        far = r1.to_board(*r1.pads["1"][:2])
+        self.assertAlmostEqual(near[1], 16.0, places=3)        # on U1.1's row
+        self.assertLess(near[0], 17.5)                          # left of the IC (pin 1 escapes left)
+        self.assertLess(far[0], near[0])                        # rail end further out

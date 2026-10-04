@@ -1,4 +1,4 @@
-# Ported from Groundplane fabhub/bompnp.py (som_builder repo), unchanged except imports.
+# Ported from Groundplane's fabhub bompnp, unchanged except imports.
 """JLCPCB BOM + PNP generation - server-side port of jlcpcb_export_with_MF_MP_EQUIV.ulp.
 
 This is the single source of truth for what the ULP used to compute inside Fusion:

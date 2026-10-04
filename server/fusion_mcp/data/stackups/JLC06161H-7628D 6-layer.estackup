@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE eagle SYSTEM "eagle.dtd">
+<eagle version="9.7.0">
+<layerstackup name="JLC06161H-7628D" type="Standard Stackup" version="V2" display_unit="mic" roughness_model="1" allow_instack_material_edit="yes">
+ <layerdef type="Silk Screen" id="{4f12b030-08b1-4ea7-a083-69d34c55a3fd}" name="Top SilkScreen">
+ <material type="ASP" name="ASP:White" material="Epoxy Ink" process="Automatic Screen Printing" color="#FFFFFFFF" description="Automatic Screen Printing - White"/>
+</layerdef>
+ <layerdef type="Solder Mask" id="{5d7d7f4c-dce5-4f4e-babf-a8c7b2d6c431}" name="Top SolderMask" locally_modified_material="yes">
+ <material name="JLC solder mask" thickness="0.0305mm" dielectric_constant="3.8" dissipation_factor="0.025" glass_transition_temperature="125degC" color="#FF000000" description="JLC solder mask (1.2 mil over substrate, Er 3.8)" source="User"/>
+</layerdef>
+ <layerdef type="Surface Finish" id="{0749ea69-d8f6-479a-9715-3ba90cd42a64}" name="Top Surface Finish">
+ <material type="HASL-LeadFree" material="Lead-Free" process="HASL Lead-Free" thickness="0.02mm" color="#FFF2F2F2" description="Surface Finish"/>
+</layerdef>
+ <layerdef type="Signal" id="{311a760b-1b96-41f9-af68-cc73b12e5a3d}" layer="1" name="Top" comment="No comment" locally_modified_material="yes">
+ <material name="1oz outer" thickness="0.035mm" weight="1oz" process="Electro Deposited" description="JLC outer copper" source="User"/>
+</layerdef>
+ <layerdef type="Prepreg" id="{190979b2-8353-40ff-ab04-ecbc9c73b6e7}" layer="1" name="Dielectric-1" comment="" locally_modified_material="yes">
+ <material name="JLC 7628+7628 0.4244" oem="JLC" oem_material="7628+7628" thickness="0.4244mm" dielectric_constant_1g="4.4" description="JLC06161H-7628D: 7628 0.216 mm + 7628 0.2084 mm (JLC, 2026-10-04)" source="User"/>
+</layerdef>
+ <layerdef type="Signal" id="{2bd9b713-2053-4153-801d-bd7f4bf9be35}" layer="2" name="L2" comment="No comment" locally_modified_material="yes">
+ <material name="0.5oz inner" thickness="0.0152mm" weight="1/2oz" process="Electro Deposited" description="JLC inner copper" source="User"/>
+</layerdef>
+ <layerdef type="Core" id="{b678063e-cafb-4ec1-ae49-7a31f6d64d5f}" layer="3" name="Dielectric-3" comment="" locally_modified_material="yes">
+ <material name="JLC Core 0.2" oem="JLC" oem_material="Core" thickness="0.2mm" dielectric_constant_1g="4.6" description="JLC06161H-7628D: core 0.2 mm (JLC, 2026-10-04)" source="User"/>
+</layerdef>
+ <layerdef type="Signal" id="{9332e3b0-a03b-42cd-9bde-5d95d9a91eff}" layer="3" name="L3" comment="No comment" locally_modified_material="yes">
+ <material name="0.5oz inner" thickness="0.0152mm" weight="1/2oz" process="Electro Deposited" description="JLC inner copper" source="User"/>
+</layerdef>
+ <layerdef type="Prepreg" id="{de18b860-3857-42b4-8a18-8a2893d1ecb6}" layer="5" name="Dielectric-5" comment="" locally_modified_material="yes">
+ <material name="JLC 7628 0.2008" oem="JLC" oem_material="7628" thickness="0.2008mm" dielectric_constant_1g="4.4" description="JLC06161H-7628D: 7628 0.2008 mm (JLC, 2026-10-04)" source="User"/>
+</layerdef>
+ <layerdef type="Signal" id="{b0b5788e-d4d2-4ae2-bb4b-b7aca686603d}" layer="302" name="L4" comment="No comment" locally_modified_material="yes">
+ <material name="0.5oz inner" thickness="0.0152mm" weight="1/2oz" process="Electro Deposited" description="JLC inner copper" source="User"/>
+</layerdef>
+ <layerdef type="Core" id="{f9b77b05-1307-42ce-be10-e473a6b48dbe}" layer="7" name="Dielectric-7" comment="" locally_modified_material="yes">
+ <material name="JLC Core 0.2" oem="JLC" oem_material="Core" thickness="0.2mm" dielectric_constant_1g="4.6" description="JLC06161H-7628D: core 0.2 mm (JLC, 2026-10-04)" source="User"/>
+</layerdef>
+ <layerdef type="Signal" id="{66cd76c3-fd08-4e94-8d60-98708785d6ea}" layer="303" name="L5" comment="No comment" locally_modified_material="yes">
+ <material name="0.5oz inner" thickness="0.0152mm" weight="1/2oz" process="Electro Deposited" description="JLC inner copper" source="User"/>
+</layerdef>
+ <layerdef type="Prepreg" id="{15ccc093-920e-4070-81bc-ef567e002a77}" layer="9" name="Dielectric-9" comment="" locally_modified_material="yes">
+ <material name="JLC 7628+7628 0.4244" oem="JLC" oem_material="7628+7628" thickness="0.4244mm" dielectric_constant_1g="4.4" description="JLC06161H-7628D: 7628 0.2084 mm + 7628 0.216 mm (JLC, 2026-10-04)" source="User"/>
+</layerdef>
+ <layerdef type="Signal" id="{bedf61c7-f6ca-4b66-ab42-a34008f8f44d}" layer="304" name="Bottom" comment="No comment" locally_modified_material="yes">
+ <material name="1oz outer" thickness="0.035mm" weight="1oz" process="Electro Deposited" description="JLC outer copper" source="User"/>
+</layerdef>
+ <layerdef type="Surface Finish" id="{18d5e53b-b089-4e18-9a99-ca085ac444d3}" name="Bottom Surface Finish">
+ <material type="HASL-LeadFree" material="Lead-Free" process="HASL Lead-Free" thickness="0.02mm" color="#FFF2F2F2" description="Surface Finish"/>
+</layerdef>
+ <layerdef type="Solder Mask" id="{f259b919-e3cf-4c01-9f1b-9d74a5e5927f}" name="Bottom SolderMask" locally_modified_material="yes">
+ <material name="JLC solder mask" thickness="0.0305mm" dielectric_constant="3.8" dissipation_factor="0.025" glass_transition_temperature="125degC" color="#FF000000" description="JLC solder mask (1.2 mil over substrate, Er 3.8)" source="User"/>
+</layerdef>
+ <layerdef type="Silk Screen" id="{f94c4e3b-b1e7-4e92-a7d3-ab408b378bdf}" name="Bottom SilkScreen">
+ <material type="ASP" name="ASP:White" material="Epoxy Ink" process="Automatic Screen Printing" color="#FFFFFFFF" description="Automatic Screen Printing - White"/>
+</layerdef>
+ <viadef name="Thru 1:64" startlayer="1" stoplayer="304" complement="no"/>
+ </layerstackup>
+</eagle>

@@ -90,20 +90,21 @@ def doctor() -> int:
     from .builtin import URL as BUILTIN_URL, BuiltinClient
     from .bridge import Bridge, BridgeOpError, BridgeUnavailable
     builtin = BuiltinClient().available()
-    line(True if builtin else None, "Fusion's built-in MCP server",
-         f"answering at {BUILTIN_URL}: no add-in needed" if builtin else
-         "not answering (Fusion closed, or its MCP server is off); the add-in is used instead")
+    line(True if builtin else None, "Fusion's built-in MCP server (fallback)",
+         f"answering at {BUILTIN_URL}" if builtin else
+         "not answering (Fusion closed, or its MCP server is off)")
     try:
         dest = os.path.join(fusion_addins_dir(), ADDIN_NAME)
         installed = manifest_version(dest) if os.path.exists(dest) else None
         if installed:
-            line(True if installed == bundled else False, "Add-in (optional fallback)",
+            line(True if installed == bundled else False, "Add-in (recommended)",
                  f"{installed} at {dest}" + ("" if installed == bundled else
                  f"; this package ships {bundled}: fusion-electronics-mcp install-addin --force"))
         else:
-            line(True if builtin else False, "Add-in (optional fallback)",
-                 "not installed" + ("" if builtin else ": install it (fusion-electronics-mcp install-addin) "
-                                    "or turn on Fusion's built-in MCP server"))
+            line(False, "Add-in (recommended)",
+                 "not installed: fusion-electronics-mcp install-addin, then run it in Fusion (Utilities > "
+                 "Add-Ins, Run on Startup)" + ("; the built-in server works meanwhile, without saves of "
+                                              "libraries or 3D pushes" if builtin else ""))
     except SystemExit as ex:
         line(False, "Platform", str(ex))
     try:

@@ -1,4 +1,4 @@
-# Ported from Groundplane fabhub/eagle.py (som_builder repo), unchanged except imports.
+# Ported from Groundplane's fabhub eagle reader, unchanged except imports.
 """EAGLE XML reader for Fusion 360 Electronics boards and libraries.
 
 Fusion's own containers are zips wrapping plain EAGLE 9.7 XML:

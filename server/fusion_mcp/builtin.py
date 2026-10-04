@@ -32,7 +32,7 @@ ADDIN_SOURCE = os.path.join(os.path.dirname(__file__), "addin", "FusionElectroni
 MARK = "@@FEMCP@@"
 # operations that only read the design (run as read-only scripts: allowed while
 # the person is in the middle of a command)
-READ_ONLY_OPS = {"ping", "context", "export", "design_rules", "layers", "pours", "list_designs", "errors"}
+READ_ONLY_OPS = {"ping", "context", "export", "design_rules", "layers", "pours", "list_designs", "errors", "elements3d", "lib_device3d", "pcb3d_bodies"}
 _BUSY = "while a command dialog is open"
 
 

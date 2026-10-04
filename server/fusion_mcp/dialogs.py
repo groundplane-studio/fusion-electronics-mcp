@@ -196,6 +196,24 @@ FORM_RENAME_THIS_SEGMENT = {
     "label": "renamed this segment only",
 }
 
+# ADD of a power symbol whose net name follows its value (allow_supply_override,
+# e.g. GPLIB's power bars) asks for the value, prefilled with the default; keep it
+# (OK) and set the real value with VALUE in a later script, which does not ask.
+# Seen on 2705.1.15.
+FORM_PUSH_3D = {
+    "title": r"^PUSH TO 3D PCB$",
+    "requires": [],
+    "actions": [{"do": "press", "target": "Push"}],
+    "label": "pushed the board to its 3D PCB with Fusion's current settings",
+}
+
+FORM_SUPPLY_VALUE = {
+    "title": r"^Value$",
+    "requires": [],
+    "actions": [{"do": "press", "target": "OK"}],
+    "label": "kept the power symbol's default value (set afterwards)",
+}
+
 FORM_RENAME_ALL_SEGMENTS = {
     "title": r"^Name$",
     "requires": ["every Segment on this Sheet"],

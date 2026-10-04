@@ -1,19 +1,145 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-04)
 
 First public release.
 
 ### Connection
-- Talks to Fusion through Fusion's built-in MCP server (Preferences > General
-  > API > Fusion MCP Server): nothing to install inside Fusion. The bundled
-  add-in remains as a fallback (`fusion-electronics-mcp install-addin`).
+- Talks to Fusion through the bundled add-in (`fusion-electronics-mcp
+  install-addin`; 127.0.0.1 only, token-gated). Fusion's built-in MCP server
+  is the fallback when the add-in is not running; saving and pushing to the
+  3D PCB refuse to run on it, since it drops library saves and cancels
+  Fusion's dialogs.
 - `fusion-electronics-mcp doctor` checks the setup; `tools` lists the tools.
 - Every write is verified by reading the design back and undone on mismatch;
   one undo step per tool call; Fusion's dialogs are answered safely (Windows);
   keyboard focus is handed back if Fusion takes it.
 
-### Tools (65)
+### Schematics drawn as blocks
+- `import_netlist_from_kicad` draws a reviewable schematic by default
+  (`style="blocks"`): each IC or connector with its passives wired to it
+  (series parts inline, caps and pull-ups hanging off the net, LED and FET
+  drivers stacked, bootstrap caps bridging their pins), labels only on nets
+  that leave a block, ground and rails as power symbols, blocks packed onto
+  framed sheets. Parts are added once to read their real symbols, the layout
+  is checked offline (every pin, no shorts, no piece of a net joined only by
+  name), an HTML preview is written, and every pin is checked against the
+  netlist after drawing. `preview_only=true` stops before drawing.
+- `pad_map` translates KiCad pad names to library pad names (one-pad parts map
+  themselves).
+
+### EasyEDA etiquette across processes
+- Every request to EasyEDA goes through one limiter shared by all processes
+  on the machine (a clock file in the cache folder plus a lock): at least
+  15 s apart with a little jitter, and a 15 minute back-off after a 403 or
+  429, so two sessions or a library worker never burst.
+
+### Design rules and stackups
+- Rule sets and stackups for every JLCPCB impedance stackup (16 four-layer,
+  14 six-layer) and a 2-layer 1.6 mm board, each as a .edru (rules plus
+  stackup) and a .estackup. Built by `tools/gen_jlc_stackups.py` from JLC's
+  published tables (thicknesses and dielectric constants as JLC states them;
+  stacked plies combined in series; a stackup with a material JLC gives no
+  dielectric constant for is left out). `list_design_rules` shows them and
+  can copy them where Fusion's file dialog reaches. 4- and 6-layer files load
+  in Fusion's DRC dialog and Layer Stack Manager (checked). The 2-layer core's Er
+  (4.5) is the 2-layer value on JLC's capabilities page.
+- Rule values checked against JLC's published capabilities (2026-10-04) and
+  raised where they fell short: SMD pad to pad 0.15 mm, hole to hole 0.2 mm,
+  PTH annular ring at least 0.18 mm, via ring at least 0.1 mm (via hole to
+  track 0.2 mm). Minimum drill is 0.3 mm: JLC drills 0.15 to 0.2 mm but charges
+  more for it, so lower it only when a design needs it.
+
+### Opening designs never walks the project
+- `open_design` / `open_library` bring an already open document forward
+  without listing anything, and otherwise look only in the active project's
+  top folder or the one folder you name, stopping after a few seconds.
+  Walking a big project's folder tree froze Fusion.
+
+### Your own parts library
+- `create_library_part` turns a KiCad footprint (KiCad's own, or JLCPCB's
+  exported with easyeda2kicad) into a part in the server's component library,
+  with a generated symbol and the JLCPCB number, ready for
+  `insert_library_part`. The README walks through setting up a library.
+
+### One symbol style for every two-pin passive
+- Parts built into a library (`insert_library_part`) draw resistors,
+  capacitors, inductors, ferrites, fuses, crystals, diodes, LEDs and TVS with
+  the server's standard symbols, whatever symbol the part came with from
+  EasyEDA or KiCad (style inferred from the prefix and description; `"style":
+  false` keeps the part's own).
+
+### 3D models that land the right way up
+- `attach_3d_model` refuses a model whose body would sit below the board
+  (nothing is saved): vendor STEPs are often Y-up, and KiCad's 3D rotation
+  signs are the opposite of Fusion's. More of the model below the board than
+  above counts as upside down (a flipped through-hole part still pokes its
+  pins up). A replacement model's file gets a versioned name.
+- `update_from_libraries(refresh_parts=...)` re-pulls parts Fusion's own update
+  leaves on an old 3D model (it reports nothing to do), answering Fusion's
+  "update device set?" question, and reports every part's 3D model afterwards.
+- `push_3d` brings the board into its 3D PCB (creating it the first time and
+  answering the Push dialog); `check_3d_models` lists any part whose model is
+  on the wrong side, wherever Fusion nests it.
+- A question from Fusion that a tool did not expect now fails the call instead
+  of quietly getting the safe answer and carrying on.
+
+### Placement and routing, the way a person does it
+- `place_clusters`: passives placed around the part they serve by rule (the
+  user's patterns; ported from Groundplane's KiCad solver, plus chains and
+  connector pins at a board edge escaping into the board). Preview first.
+- The routing order is a set of tools: `add_pour` (priority `rank`),
+  `ground_vias` (a via beside every ground pad, never under a part, 0.3 mm
+  drill), `route_close` (every short hop at once), `lay_bus` (ordered parallel
+  lanes along a path, staggered ends so tap vias never collide),
+  `route_remaining` (the rest, with rip-up and reroute), plus `route_trace` and
+  `route_net` for single connections and nets.
+- New router (numpy grid, A* with 45-degree moves): about 10x faster than the
+  first version on a two-layer power backplane benchmark, pays to cut other nets' power
+  pours (cuts dropped from 109 mm to 2 mm) and to run through connector pin
+  fields, taps into a net's existing copper, smooths the grid's jogs, and every
+  write is checked for connections and for top/bottom traces meeting without a
+  via (Fusion's airwire count can miss that).
+- Neck-down: a power trace wider than a fine-pitch pad narrows to the pad's
+  width close to it and keeps its full width elsewhere.
+- Oblong pads (round-ended SMDs, long through-hole pads) are modelled by
+  their real shape, so traces can pass their ends at the real clearance.
+- Optional `hug` cost in the router: traces prefer the lane one clearance
+  beside existing traces, so long runs form bundles.
+- Tested on a second board, a 4-layer carrier with 0.65 mm pitch QFN and
+  VSSOP parts and 0.15 mm rules: 84 of 84 connections in about 13 s, no
+  clearance errors, 10% shorter than the board's Freerouting routing.
+- `import_placement_from_kicad` places each part by where its pads must land
+  (`fit_pads`, on by default), so a Fusion footprint whose origin or pin-1
+  orientation differs from KiCad's still lands pad for pad; parts whose pads
+  still disagree by more than 0.1 mm are reported.
+- Fixed: a KiCad bottom-side part at angle R is Fusion's mirrored part at
+  180 - R, not R + 180 (the two agree only at 0 and 180; at 90 and 270 the
+  old rule swapped the pads). Checked against pcbnew pad positions.
+- Block schematics: nets named like supplies (3V3_AUX, +5V, V12) are drawn as
+  rails however few pins they have; a decoupling cap joins the block of the
+  IC pin it sits next to on the board; output caps follow the regulator that
+  makes the rail; a sub-circuit counts each main-part pin it touches once, so
+  a buck's output stage stays with the buck, not the connector it feeds;
+  spare pins on named nets get a label; a final pass wires any pin left
+  unwired and labels any net piece joined only by name.
+- Power pours are close to a wall for other nets' traces, and no via is put
+  through another net's outer power pour (inner planes still take vias).
+- `lay_bus` reports a lane whose taps would land in another net's power pour.
+- `remove_stubs` finds dangling ends from the copper itself (Fusion's DRC
+  misses a bus lane's tail past its last tap), cuts a tail back to its last
+  tap, and undoes any change that adds an unrouted connection.
+- Fixed: `route_remaining` could tap copper of the net that was not yet joined
+  to the pin it was routing to (a bus lane no pin had reached), leaving the
+  connection open while reporting it routed. Taps are now limited to copper
+  joined to the goal, and joins part-way along a trace count as joined.
+- Block schematics: wire ends are snapped onto pins after a block is moved
+  (rounding could leave one 0.0001 mm off, which Fusion does not connect).
+- `stitch_vias` keeps off parts and out of other nets' pours.
+- `import_routing_from_kicad` copies a KiCad board's tracks and vias.
+- Writes containing editor settings (SET) are one undo step again.
+
+### Tools (77)
 - Review: board/schematic summaries, parts, nets, DRC, ERC, schematic review
   rules, `render_board`.
 - Signal integrity: differential pairs, length matching, impedance estimates

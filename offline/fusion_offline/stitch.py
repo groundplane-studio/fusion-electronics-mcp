@@ -46,6 +46,7 @@ class Obstacle:
     is_pad: bool
     data: tuple
     layers: frozenset | None = None   # export copper layers it occupies; None = all (THT pads, vias, holes)
+    tag: str | None = None            # route_all's connection id on traces/vias it laid (rip-up)
 
     def distance(self, x: float, y: float) -> float:
         """Distance from (x, y) to the obstacle's copper/edge (<= 0 inside)."""
@@ -64,6 +65,15 @@ class Obstacle:
         L2 = vx * vx + vy * vy
         t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((x - x1) * vx + (y - y1) * vy) / L2))
         return math.hypot(x - (x1 + t * vx), y - (y1 + t * vy)) - half
+
+
+def _stadium(net, cx, cy, dx, dy, ang, layers) -> Obstacle:
+    """An oblong pad (round ends): a segment along its long axis widened by half its short side,
+    which is its exact shape (a rectangle would over-claim the corners)."""
+    long_, short = max(dx, dy), min(dx, dy)
+    a = math.radians(ang + (0 if dx >= dy else 90))
+    hx, hy = math.cos(a) * (long_ - short) / 2, math.sin(a) * (long_ - short) / 2
+    return Obstacle("seg", net, True, (cx - hx, cy - hy, cx + hx, cy + hy, short / 2), layers)
 
 
 def _ring(rules: dict, kind: str, drill: float) -> float:
@@ -106,10 +116,10 @@ def board_obstacles(root: ET.Element) -> tuple[list[Obstacle], dict, list[tuple[
             sag = 0.0 if c < 1e-9 else chord / (2 * math.sin(c / 2)) * (1 - math.cos(c / 2))
             obs.append(Obstacle("seg", s.get("name"), False,
                                 (_f(w, "x1"), _f(w, "y1"), _f(w, "x2"), _f(w, "y2"), _f(w, "width") / 2 + sag),
-                                frozenset({int(w.get("layer"))})))
+                                frozenset({int(w.get("layer"))}), w.get("mcp_conn")))
         for v in s.iterfind("via"):
             d = max(_f(v, "diameter"), _f(v, "drill") + 2 * _ring(rules, "Via", _f(v, "drill")))
-            obs.append(Obstacle("circle", s.get("name"), False, (_f(v, "x"), _f(v, "y"), d / 2)))
+            obs.append(Obstacle("circle", s.get("name"), False, (_f(v, "x"), _f(v, "y"), d / 2), None, v.get("mcp_conn")))
     pkgs = {}
     for lib in board.iterfind("./libraries/library"):
         for pk in lib.iterfind("./packages/package"):
@@ -125,8 +135,12 @@ def board_obstacles(root: ET.Element) -> tuple[list[Obstacle], dict, list[tuple[
             prot, _ = parse_rot(smd.get("rot"))
             a = (ang + prot) * (-1 if mir else 1)
             side = 16 if (smd.get("layer") == "1") == mir else 1
-            obs.append(Obstacle("rect", pad_net.get((el.get("name"), smd.get("name"))), True,
-                                (cx, cy, _f(smd, "dx") / 2, _f(smd, "dy") / 2, a), frozenset({side})))
+            net_ = pad_net.get((el.get("name"), smd.get("name")))
+            dx, dy = _f(smd, "dx"), _f(smd, "dy")
+            if _f(smd, "roundness") >= 100:
+                obs.append(_stadium(net_, cx, cy, dx, dy, a, frozenset({side})))
+            else:
+                obs.append(Obstacle("rect", net_, True, (cx, cy, dx / 2, dy / 2, a), frozenset({side})))
         for pad in pk.iterfind("pad"):
             cx, cy = _xf(_f(pad, "x"), _f(pad, "y"), ex, ey, ang, mir)
             drill = _f(pad, "drill")
@@ -134,14 +148,14 @@ def board_obstacles(root: ET.Element) -> tuple[list[Obstacle], dict, list[tuple[
             net_ = pad_net.get((el.get("name"), pad.get("name")))
             shape = (pad.get("shape") or "round").lower()
             if shape in ("long", "offset"):
-                # LONG: elongated to 2x the diameter along the pad's x (psElongationLong 100%);
-                # OFFSET: the same length, shifted to one side. Kept as a rectangle (conservative).
+                # LONG: elongated to 2x the diameter along the pad's x (psElongationLong 100%), with
+                # round ends; OFFSET: the same shape, shifted to one side
                 prot, _ = parse_rot(pad.get("rot"))
                 a = (ang + prot) * (-1 if mir else 1)
                 if shape == "offset":
                     ra = math.radians(a)
                     cx, cy = cx + math.cos(ra) * dia / 2, cy + math.sin(ra) * dia / 2
-                obs.append(Obstacle("rect", net_, True, (cx, cy, dia, dia / 2, a)))
+                obs.append(_stadium(net_, cx, cy, 2 * dia, dia, a, None))
             else:
                 obs.append(Obstacle("circle", net_, True, (cx, cy, dia / 2)))
         for h in pk.iterfind("hole"):
@@ -159,6 +173,15 @@ def board_obstacles(root: ET.Element) -> tuple[list[Obstacle], dict, list[tuple[
     return obs, rules, outline
 
 
+def _inside_poly(poly, x, y) -> bool:
+    """Even-odd point-in-polygon over a vertex list."""
+    c = False
+    for (ax, ay), (bx, by) in zip(poly, poly[1:] + poly[:1]):
+        if (ay > y) != (by > y) and x < ax + (y - ay) * (bx - ax) / (by - ay):
+            c = not c
+    return c
+
+
 def _inside(x, y, segs) -> bool:
     """Even-odd point-in-polygon over the outline's straight segments."""
     inside = False
@@ -172,17 +195,28 @@ def _inside(x, y, segs) -> bool:
 
 def plan_stitching(root: ET.Element, net: str, pitch: float = 2.0, drill: float | None = None,
                    clearance: float | None = None, min_spacing: float | None = None,
-                   keep_away: dict[str, float] | None = None) -> dict:
+                   keep_away: dict[str, float] | None = None, diameter: float | None = None,
+                   under_parts: str | None = None, pin_field_margin: float = 2.0) -> dict:
     """keep_away: {net regex: mm} larger clearances to some nets' copper, e.g. keep
-    stitching vias as far from impedance-controlled pairs as the pours are."""
+    stitching vias as far from impedance-controlled pairs as the pours are.
+    under_parts: refdes regex of parts vias may go under (big through-hole connectors: open
+    ground under the body); their pads still keep the clearance. Other parts stay via-free."""
     import re
     away = [(re.compile(k), float(v)) for k, v in (keep_away or {}).items()]
     obs, rules, outline = board_obstacles(root)
     if not outline:
         raise ValueError("board has no outline")
-    drill = drill or _mm(rules.get("msDrill"), 0.3)
+    # 0.3 mm is the smallest drill at JLC's standard price; smaller costs extra, so the design's
+    # minimum (often 0.2) is NOT used unless asked for
+    drill = drill or max(0.3, _mm(rules.get("msDrill"), 0.3))
     ring = max(0.25 * drill, _mm(rules.get("rlMinViaOuter"), 0.2032))
-    r = (drill + 2 * ring) / 2
+    r = max(drill + 2 * ring, diameter or 0.6) / 2
+    allow = re.compile(under_parts) if under_parts else None
+    bodies = [b for ref, b in part_bodies(root) if not (allow and allow.fullmatch(ref))]
+    if allow:
+        # under a connector's body is fine, its pin field is not (the user removed every via
+        # between and just beside big connectors' pin rows, kept the overhang ones)
+        bodies += [b for ref, b in pin_fields(root, pin_field_margin) if allow.fullmatch(ref)]
     clr = clearance if clearance is not None else max(_mm(rules.get("mdWireVia"), 0.2), _mm(rules.get("mdPadVia"), 0.2))
     edge = _mm(rules.get("mdCopperDimension"), 0.3)
     spacing = min_spacing if min_spacing is not None else pitch * 0.9
@@ -191,6 +225,24 @@ def plan_stitching(root: ET.Element, net: str, pitch: float = 2.0, drill: float 
     x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
     edge_segs = [Obstacle("seg", None, False, (a, b, c, d, 0.0)) for a, b, c, d in outline]
     existing = [(o.data[0], o.data[1]) for o in obs if o.kind == "circle" and o.net == net and not o.is_pad]
+    # where another net pours (a power island over the plane), a via would only nick that pour
+    # without tying the net's copper together: skip those spots
+    foreign = []
+    for sg in root.iterfind("./drawing/board/signals/signal"):
+        if sg.get("name") == net:
+            continue
+        for pg in sg.iterfind("polygon"):
+            foreign.append([(_f(v, "x"), _f(v, "y")) for v in pg.iterfind("vertex")])
+
+    def in_foreign(x, y):
+        for poly in foreign:
+            inside = False
+            for (ax, ay), (bx, by) in zip(poly, poly[1:] + poly[:1]):
+                if (ay > y) != (by > y) and x < ax + (y - ay) * (bx - ax) / (by - ay):
+                    inside = not inside
+            if inside:
+                return True
+        return False
     chosen: list[tuple[float, float]] = []
     reasons = {"edge": 0, "copper": 0, "pad": 0, "keepout_or_hole": 0, "spacing": 0}
     nx, ny = int((x1 - x0) / pitch), int((y1 - y0) / pitch)
@@ -200,6 +252,13 @@ def plan_stitching(root: ET.Element, net: str, pitch: float = 2.0, drill: float 
             x, y = round(ox + i * pitch, 4), round(oy + j * pitch, 4)
             if not _inside(x, y, outline) or min(e.distance(x, y) for e in edge_segs) < edge + r:
                 reasons["edge"] += 1
+                continue
+            if any(b[0] - r < x < b[2] + r and b[1] - r < y < b[3] + r for b in bodies):
+                reasons["pad"] += 1           # not under a part
+                continue
+            if in_foreign(x, y):
+                reasons.setdefault("other_net_pour", 0)
+                reasons["other_net_pour"] += 1
                 continue
             bad = None
             for o in obs:
@@ -241,8 +300,61 @@ def pad_center(root: ET.Element, ref: str, pad: str) -> tuple[float, float] | No
     return None
 
 
+def pin_fields(root: ET.Element, margin: float = 2.0) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """(refdes, box) around each part's pads, grown by `margin`."""
+    from .eagle import parse_rot
+    board = root.find("./drawing/board")
+    pkgs = {(lib.get("name"), pk.get("name")): pk for lib in board.iterfind("./libraries/library")
+            for pk in lib.iterfind("./packages/package")}
+    out = []
+    for el in board.iterfind("./elements/element"):
+        pk = pkgs.get((el.get("library"), el.get("package")))
+        if pk is None:
+            continue
+        ang, mir = parse_rot(el.get("rot"))
+        pts = [_xf(_f(p, "x"), _f(p, "y"), _f(el, "x"), _f(el, "y"), ang, mir)
+               for p in list(pk.iterfind("pad")) + list(pk.iterfind("smd"))]
+        if pts:
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            out.append((el.get("name"), (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)))
+    return out
+
+
+def part_bodies(root: ET.Element, margin: float = 0.15) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """(ref, (x0, y0, x1, y1)) per part: the box around its pads' copper and its silk / documentation
+    outline: the area under its body, where a via does not belong (on a test board vias landed
+    between cap pads, and inside an electrolytic's can outline)."""
+    board = root.find("./drawing/board")
+    pkgs = {(lib.get("name"), pk.get("name")): pk for lib in board.iterfind("./libraries/library")
+            for pk in lib.iterfind("./packages/package")}
+    out = []
+    for el in board.iterfind("./elements/element"):
+        pk = pkgs.get((el.get("library"), el.get("package")))
+        if pk is None:
+            continue
+        ang, mir = parse_rot(el.get("rot"))
+        xs, ys = [], []
+        for p in list(pk.iterfind("smd")) + list(pk.iterfind("pad")):
+            hw = (_f(p, "dx") or _f(p, "diameter") or 1.0) / 2
+            hh = (_f(p, "dy") or _f(p, "diameter") or 1.0) / 2
+            for dx, dy in ((-hw, -hh), (hw, hh), (-hw, hh), (hw, -hh)):
+                x, y = _xf(_f(p, "x") + dx, _f(p, "y") + dy, _f(el, "x"), _f(el, "y"), ang, mir)
+                xs.append(x)
+                ys.append(y)
+        for w in pk.iterfind("wire"):          # the outline drawn on silk / documentation (a can, a body)
+            if w.get("layer") in ("21", "22", "51", "52"):
+                for k in (("x1", "y1"), ("x2", "y2")):
+                    x, y = _xf(_f(w, k[0]), _f(w, k[1]), _f(el, "x"), _f(el, "y"), ang, mir)
+                    xs.append(x)
+                    ys.append(y)
+        if len(xs) >= 8:                       # two pads or more: there is a body between them
+            out.append((el.get("name"), (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)))
+    return out
+
+
 def plan_fanout(root: ET.Element, ref: str, pad: str, net: str, trace_width: float = 0.25,
-                max_dist: float = 3.0, step: float = 0.1, drill: float | None = None) -> dict | None:
+                max_dist: float = 3.0, step: float = 0.1, drill: float | None = None,
+                diameter: float | None = None) -> dict | None:
     """Nearest via position for a pad's fanout: the via clears other nets'
     copper, every pad (including this one: no via-in-pad), holes, keepouts and
     the edge; and the straight trace from the pad centre to it clears other
@@ -251,9 +363,12 @@ def plan_fanout(root: ET.Element, ref: str, pad: str, net: str, trace_width: flo
     c = pad_center(root, ref, pad)
     if c is None:
         raise KeyError(f"no pad {ref}.{pad}")
-    drill = drill or _mm(rules.get("msDrill"), 0.3)
+    # 0.3 mm is the smallest drill at JLC's standard price; smaller costs extra, so the design's
+    # minimum (often 0.2) is NOT used unless asked for
+    drill = drill or max(0.3, _mm(rules.get("msDrill"), 0.3))
     ring = max(0.25 * drill, _mm(rules.get("rlMinViaOuter"), 0.2032))
-    r = (drill + 2 * ring) / 2
+    r = max(drill + 2 * ring, diameter or 0.6) / 2
+    bodies = [b for _, b in part_bodies(root)]
     clr = max(_mm(rules.get("mdWireVia"), 0.2), _mm(rules.get("mdPadVia"), 0.2))
     wclr = max(_mm(rules.get("mdWireWire"), 0.15), _mm(rules.get("mdWirePad"), 0.15))
     edge = _mm(rules.get("mdCopperDimension"), 0.3)
@@ -270,6 +385,8 @@ def plan_fanout(root: ET.Element, ref: str, pad: str, net: str, trace_width: flo
                 continue
             if not _inside(x, y, outline) or min(e.distance(x, y) for e in edges) < edge + r:
                 continue
+            if any(b[0] - r < x < b[2] + r and b[1] - r < y < b[3] + r for b in bodies):
+                continue                       # not under a part
             if any(o.distance(x, y) < r + (clr if (o.is_pad or o.net) else 0.0) for o in blockers + others):
                 continue
             ok = True
@@ -317,8 +434,21 @@ def stub_candidates(root: ET.Element, tol: float = 1e-3) -> list[dict]:
                              for j, (a1, b1, a2, b2, l2, _) in enumerate(segs))
                 if not ok:
                     on = next(((cx, cy) for cx, cy, o in pads.get(net, []) if o.distance(px, py) <= tol), None)
+                    # the last point along the segment (from its other end) where something joins it
+                    ox, oy = (x2, y2) if (px, py) == (x1, y1) else (x1, y1)
+                    L = math.hypot(px - ox, py - oy)
+                    joins = [(a, b) for a, b in vias] + [q for j, (a1, b1, a2, b2, l2, _) in enumerate(segs)
+                                                         if j != i and l2 == layer for q in ((a1, b1), (a2, b2))]
+                    seg = Obstacle("seg", net, False, (x1, y1, x2, y2, 0.0))
+                    ts = [((q[0] - ox) * (px - ox) + (q[1] - oy) * (py - oy)) / (L * L) for q in joins
+                          if L > 0 and seg.distance(*q) <= tol]
+                    ts = [t for t in ts if 1e-6 < t < 1 - 1e-6]
+                    keep_to = None
+                    if ts:
+                        t = max(ts)
+                        keep_to = (round(ox + (px - ox) * t, 4), round(oy + (py - oy) * t, 4))
                     out.append({"net": net, "layer": int(layer), "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                                "width": width, "dangling": (px, py), "on_pad": on,
+                                "width": width, "dangling": (px, py), "on_pad": on, "keep_to": keep_to,
                                 "length": round(math.hypot(x2 - x1, y2 - y1), 4)})
                     break
     return out

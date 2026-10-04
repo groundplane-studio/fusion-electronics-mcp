@@ -1,0 +1,1625 @@
+{
+ "source": "https://jlcpcb.com/impedance",
+ "retrieved": "2026-10-04",
+ "dielectric_constants": {
+  "7628": 4.4,
+  "3313": 4.1,
+  "1080": 3.91,
+  "2116": 4.16,
+  "core": 4.6,
+  "solder_mask": 3.8
+ },
+ "stackups": {
+  "JLC04161H-7628": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 1.065
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-3313": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.0994
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 1.265
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.0994
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-1080": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 1.265
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-7628A": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.865
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-3313A": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.107
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.0994
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 1.065
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.0994
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.107
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-1080A": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.084
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 1.065
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.084
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-7628B": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.4
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-2116A": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.6
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-2116B": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.865
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-2116C": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 1.065
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-7628G": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.5
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-2116": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 1.265
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-7628E": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.6
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-2116D": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.7
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-7628F": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.25
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-2116E": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.865
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC04161H-7628C": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.15
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-3313": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.0994
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.55
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1088
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.55
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.0994
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-7628": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.4
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2028
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.4
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-7628D": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.216
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2084
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.2
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2008
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.2
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2084
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.216
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-1080": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.55
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.55
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-2116A": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.13
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "core",
+    "mm": 0.7
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.13
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-1080A": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.6
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.0994
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.6
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-3313C": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.107
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.4
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.4
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0784
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.107
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-1080B": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.1
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "core",
+    "mm": 0.7
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.1
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-3313E": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.0994
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.1
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "core",
+    "mm": 0.7
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.1
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.0994
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-2116B": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.5
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.5
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-2116": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.127
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2313",
+    "mm": 0.0964
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.3
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2084
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2084
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.3
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2313",
+    "mm": 0.0964
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.127
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-7628B": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.35
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.35
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-3313D": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.107
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.25
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.124
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.2104
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.25
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "prepreg",
+    "glass": "3313",
+    "mm": 0.107
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-2116C": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.127
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1194
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.3
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1194
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.127
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1194
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.3
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1194
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.127
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ],
+  "JLC06161H-7628A": [
+   {
+    "kind": "copper",
+    "mm": 0.035
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.1
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "prepreg",
+    "glass": "2116",
+    "mm": 0.1164
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "core",
+    "mm": 0.1
+   },
+   {
+    "kind": "copper",
+    "mm": 0.0152
+   },
+   {
+    "kind": "prepreg",
+    "glass": "1080",
+    "mm": 0.0764
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "prepreg",
+    "glass": "7628",
+    "mm": 0.218
+   },
+   {
+    "kind": "copper",
+    "mm": 0.035
+   }
+  ]
+ }
+}

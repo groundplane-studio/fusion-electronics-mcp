@@ -34,7 +34,7 @@ import uuid
 import adsk.core  # type: ignore
 import adsk.electron  # type: ignore
 
-ADDIN_VERSION = "0.12.2"
+ADDIN_VERSION = "0.13.0"
 PROTOCOL = 1
 EVENT_ID = "fusion_electronics_mcp_bridge"
 DEFAULT_TIMEOUT = 60.0
@@ -486,26 +486,38 @@ def op_new_design(args):
     return op_context({})
 
 
-def _project_designs(max_depth=4):
+def _project_designs(folder=None, project=None, budget_s=8.0):
+    """Designs and libraries in the active project's top folder, or in one named folder path
+    ('Live tests', 'Parts/Connectors'). Never a recursive walk: walking a big project's folder
+    tree held the main thread until Fusion froze (2705.1.15, three times), so a search stops
+    after budget_s and says so."""
     proj = _app.data.activeProject
+    if project and project != proj.name:
+        raise BridgeError("unsupported", "only the active project can be listed: walking another project's "
+                          "folders froze Fusion (2705.1.15); open that project in Fusion first")
+    t0 = time.time()
+    node = proj.rootFolder
+    path = ""
+    for part in [x for x in (folder or "").split("/") if x]:
+        node = next((node.dataFolders.item(i) for i in range(node.dataFolders.count)
+                     if node.dataFolders.item(i).name == part), None)
+        if node is None:
+            raise BridgeError("not_found", f"no folder {folder!r} in project {proj.name!r}")
+        path = f"{path}/{part}" if path else part
+        if time.time() - t0 > budget_s:
+            raise BridgeError("timeout", f"listing project {proj.name!r} took too long; open the design in Fusion by hand")
     out = []
-
-    def walk(folder, path, depth):
-        for i in range(folder.dataFiles.count):
-            f = folder.dataFiles.item(i)
-            if f.fileExtension in ("fprj", "flbr"):
-                out.append((path, f))
-        if depth < max_depth:
-            for i in range(folder.dataFolders.count):
-                sub = folder.dataFolders.item(i)
-                walk(sub, f"{path}/{sub.name}" if path else sub.name, depth + 1)
-
-    walk(proj.rootFolder, "", 0)
+    for i in range(node.dataFiles.count):
+        f = node.dataFiles.item(i)
+        if f.fileExtension in ("fprj", "flbr"):
+            out.append((path, f))
+        if time.time() - t0 > budget_s:
+            raise BridgeError("timeout", f"listing project {proj.name!r} took too long; open the design in Fusion by hand")
     return proj, out
 
 
 def op_list_designs(args):
-    proj, found = _project_designs()
+    proj, found = _project_designs(folder=args.get("folder"), project=args.get("project"))
     return {"project": proj.name,
             "designs": [{"name": f.name, "folder": path, "version": f.versionNumber}
                         for path, f in found if f.fileExtension == "fprj"],
@@ -513,22 +525,33 @@ def op_list_designs(args):
                           for path, f in found if f.fileExtension == "flbr"]}
 
 
+def op_find_documents(args):
+    """Project names in the active hub (one call). Listing the folders of a project that is
+    not the active one froze Fusion twice on 2705.1.15 (2026-10-03: the cloud fetch never
+    completes while a script holds the main thread), so this never walks projects; open
+    libraries from other projects in Fusion by hand."""
+    hub = _app.data.activeHub
+    return {"hub": hub.name, "projects": [hub.dataProjects.item(i).name for i in range(hub.dataProjects.count)]}
+
+
 def op_open_design(args):
     name = args.get("name")
     folder = args.get("folder")
-    proj, found = _project_designs()
     ext = "flbr" if args.get("kind") == "library" else "fprj"
-    cand = [(p, f) for p, f in found if f.name == name and f.fileExtension == ext
-            and (folder is None or p == folder)]
-    if not cand:
-        raise BridgeError("not_found", f"no design {name!r} in project {proj.name!r}")
-    if len(cand) > 1:
-        raise BridgeError("ambiguous", f"{len(cand)} designs named {name!r}; pass folder: "
-                          + ", ".join(p for p, _ in cand))
+    # already open: just bring it forward, no project listing at all
     already = [d for d in _docs() if d.name == name and _kind_of(d) == ("library" if ext == "flbr" else "design")]
-    if not already:
-        _app.documents.open(cand[0][1])
-        _settle(40)
+    if already:
+        with contextlib.suppress(Exception):
+            already[0].activate()
+        return op_context({})
+    proj, found = _project_designs(folder=folder, project=args.get("project"))
+    cand = [(p, f) for p, f in found if f.name == name and f.fileExtension == ext]
+    if not cand:
+        raise BridgeError("not_found", f"no {'library' if ext == 'flbr' else 'design'} {name!r} in "
+                          f"{folder or 'the top folder'} of the active project {proj.name!r}; pass folder= "
+                          "(it is not searched recursively), or open it in Fusion by hand")
+    _app.documents.open(cand[0][1])
+    _settle(40)
     return op_context({})
 
 
@@ -623,8 +646,23 @@ def op_create_package3d(args):
     pad_bb = None
     with contextlib.suppress(Exception):
         pad_bb = _bbox_mm(rc.sketches.itemByName("Pad").boundingBox)
+    # more of the model below the board than above it = upside down (a flipped through-hole part
+    # still pokes its pins up through the board, so "top above zero" is not enough)
+    if args.get("require_up", True) and model_bb and (model_bb[5] <= 0.2 or -model_bb[2] > model_bb[5]):
+        # the body would hang below the board (a model in another up-axis convention, or a rotation
+        # with the wrong sign): never save it; once a design has used a 3D package it is very hard
+        # to replace (seen with vendor connector models)
+        with contextlib.suppress(Exception):
+            doc3d.close(False)
+        with contextlib.suppress(Exception):
+            lib_doc.activate()
+        raise BridgeError("model_below_board",
+                          f"the model spans z {model_bb[2]} to {model_bb[5]} mm: mostly below the board, upside down; fix rotation_deg "
+                          f"(KiCad's 3D rotation signs are the opposite of Fusion's) and try again. Model box {model_bb}")
     folder = _data_folder(args.get("folder") or "3D Packages")
-    doc3d.saveAs(pkg_name, folder, "3D package created by fusion-electronics-mcp", "")
+    # a new name when replacing a model: a design matches 3D packages by name, so a corrected
+    # model saved under the old name never reaches boards that already use that name
+    doc3d.saveAs(args.get("doc_name") or pkg_name, folder, "3D package created by fusion-electronics-mcp", "")
     for _ in range(120):
         adsk.doEvents()
         time.sleep(0.25)
@@ -650,7 +688,140 @@ def op_create_package3d(args):
         with contextlib.suppress(Exception):
             os.remove(f)
     return {"package": pkg_name, "model_bbox_mm": model_bb, "pad_bbox_mm": pad_bb,
-            "saved_as": f"{args.get('folder') or '3D Packages'}/{pkg_name}", "devices": linked}
+            "saved_as": f"{args.get('folder') or '3D Packages'}/{args.get('doc_name') or pkg_name}", "devices": linked}
+
+
+def op_elements3d(args):
+    """Read-only: the 3D package each board element uses (None = no 3D model), optionally
+    only `names`. locally_modified 3D packages are skipped by Fusion's library update."""
+    board = _linked("board")
+    names = set(args.get("names") or [])
+    out = []
+    els = board.elements
+    for i in range(els.count):
+        e = els.item(i)
+        if names and e.name not in names:
+            continue
+        p3 = None
+        with contextlib.suppress(Exception):
+            p3 = e.package3d
+        out.append({"name": e.name, "package3d": None if p3 is None else _safe(lambda: p3.name),
+                    "id": None if p3 is None else _safe(lambda: p3.id),
+                    "locally_modified": None if p3 is None else _safe(lambda: p3.locallyModified)})
+    return {"elements": out}
+
+
+def op_lib_device3d(args):
+    """Read-only: in the open library, the 3D packages each device links (devices whose package
+    name contains `match`, or all)."""
+    lib = _active_product("library")
+    match = (args.get("match") or "").upper()
+    out = []
+    for i in range(lib.deviceSets.count):
+        ds = lib.deviceSets.item(i)
+        for j in range(ds.devices.count):
+            d = ds.devices.item(j)
+            with contextlib.suppress(Exception):
+                if d.package and (not match or match in d.package.name.upper()):
+                    out.append({"device": ds.name + d.name, "package": d.package.name,
+                                "packages3d": [d.packages3d.item(k).name for k in range(d.packages3d.count)]})
+    return {"devices": out}
+
+
+def _pcb3d_design():
+    import adsk.fusion  # type: ignore
+    for i in range(_app.documents.count):
+        doc = _app.documents.item(i)
+        with contextlib.suppress(Exception):
+            for k in range(doc.products.count):
+                des = adsk.fusion.Design.cast(doc.products.item(k))
+                if des and des.rootComponent.allOccurrences.count:
+                    return doc, des
+    return None, None
+
+
+def op_pcb3d_bodies(args):
+    """Read-only: in the open 3D PCB, each board part's height range (mm, z) next to the board's,
+    so a model hanging on the wrong side shows up. Parts are found by reference designator at
+    any depth (Fusion nests them under 'Packages' in a new 3D PCB, at the top in older ones)."""
+    doc, des = _pcb3d_design()
+    if des is None:
+        raise BridgeError("not_found", "no 3D PCB document is open")
+    refs = set()
+    with contextlib.suppress(Exception):
+        els = _linked("board").elements
+        refs = {els.item(i).name for i in range(els.count)}
+    root = des.rootComponent
+    board = None
+    occs = root.allOccurrences
+    for i in range(occs.count):                       # a 'Board' occurrence (new 3D PCBs)
+        o = occs.item(i)
+        if o.name.split(":")[0].lower() == "board":
+            bb = o.boundingBox
+            board = (round(bb.minPoint.z * 10, 3), round(bb.maxPoint.z * 10, 3))
+            break
+    if board is None:                                 # else the largest body at the top level
+        best = None
+        for i in range(root.bRepBodies.count):
+            bb = root.bRepBodies.item(i).boundingBox
+            area = (bb.maxPoint.x - bb.minPoint.x) * (bb.maxPoint.y - bb.minPoint.y)
+            if best is None or area > best[0]:
+                best = (area, round(bb.minPoint.z * 10, 3), round(bb.maxPoint.z * 10, 3))
+        board = best[1:] if best else None
+    parts = []
+    for i in range(occs.count):
+        o = occs.item(i)
+        ref = o.name.rsplit(":", 1)[-1]
+        name = o.name.split(":")[0]
+        hit = ref in refs or name in refs or any(name.endswith(" " + r) or name.endswith("_" + r) for r in refs)
+        if not hit:
+            continue
+        with contextlib.suppress(Exception):
+            bb = o.boundingBox
+            parts.append({"occurrence": o.name, "z_mm": [round(bb.minPoint.z * 10, 3), round(bb.maxPoint.z * 10, 3)]})
+    return {"document": doc.name, "board_z_mm": None if board is None else list(board), "parts": parts}
+
+
+def op_push_3d(args):
+    """Bring the 2D board's changes into its open 3D PCB without the preferences dialog: activate
+    the 3D PCB document and run 'Pull from 2D PCB' (PullPCB3DCmd)."""
+    doc, des = _pcb3d_design()
+    if doc is None:
+        # no 3D PCB yet: Fusion's own Push to 3D PCB creates it (from the board editor)
+        if _product_kind() != "board":
+            with contextlib.suppress(Exception):
+                _linked("board")
+        cd = _app.userInterface.commandDefinitions.itemById("Electron::Pcb3DViewAdvanced")
+        if cd is None:
+            raise BridgeError("unsupported", "this Fusion build has no Push to 3D PCB command")
+        cd.execute()
+        # Fusion builds the new 3D PCB after the dialog closes: wait for it (up to ~3 minutes)
+        deadline = time.time() + float(args.get("wait_s", 180))
+        while time.time() < deadline:
+            _settle(20)                                  # about a second of event processing
+            doc, des = _pcb3d_design()
+            if doc is not None:
+                break
+        if doc is None:
+            raise BridgeError("not_found", "Push to 3D PCB did not create a 3D PCB in time (a dialog may be waiting in Fusion)")
+        _settle(200)
+        return op_pcb3d_bodies({})
+    doc.activate()
+    _settle(10)
+    cd = _app.userInterface.commandDefinitions.itemById(args.get("command") or "PullPCB3DCmd")
+    if cd is None:
+        raise BridgeError("unsupported", "this Fusion build has no PullPCB3DCmd")
+    cd.execute()
+    _settle(int(args.get("settle", 400)))             # ~20 s for the 3D PCB to rebuild
+    return op_pcb3d_bodies({})
+
+
+def _safe(fn):
+    try:
+        v = fn()
+        return v if isinstance(v, (str, int, float, bool, type(None))) else str(v)
+    except Exception as ex:
+        return f"<{type(ex).__name__}>"
 
 
 def op_update_libraries(args):
@@ -670,9 +841,12 @@ def op_update_libraries(args):
 OPS = {"ping": op_ping, "context": op_context, "activate": op_activate, "export": op_export,
        "run": op_run, "run_script": op_run_script, "errors": op_errors, "save": op_save,
        "close_library": op_close, "list_designs": op_list_designs, "open_design": op_open_design,
+       "find_documents": op_find_documents,
        "close_design": op_close_design, "design_rules": op_design_rules, "new_design": op_new_design,
        "pours": op_pours, "create_package3d": op_create_package3d,
-       "layers": op_layers, "violation_mode": op_violation_mode, "update_libraries": op_update_libraries}
+       "layers": op_layers, "violation_mode": op_violation_mode, "update_libraries": op_update_libraries,
+       "elements3d": op_elements3d, "lib_device3d": op_lib_device3d, "pcb3d_bodies": op_pcb3d_bodies,
+       "push_3d": op_push_3d}
 
 
 # ---------------------------------------------------------------------------

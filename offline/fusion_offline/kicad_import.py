@@ -97,7 +97,14 @@ def footprint_to_part(text: str, *, part_id: str, deviceset: str, prefix: str, d
             smds.append({"name": num, "x": _r(x), "y": _r(y), "dx": _r(w), "dy": _r(h),
                          "roundness": int(round(float(rr[1]) * 200)) if rr else 0, "rot": rot})
         else:
-            if shape in ("oval", "roundrect") and abs(w - h) > 1e-3:
+            if shape in ("oval", "roundrect") and abs(w - h) > 1e-3 and max(w, h) / min(w, h) < 1.6:
+                # a near-round oval (Mini-Fit's 2.7 x 3.3) as a LONG pad would be
+                # stretched to 2:1 by the board-wide elongation rule and overlap
+                # its neighbours: use a round pad on the short side
+                pads.append({"name": num, "x": _r(x), "y": _r(y), "drill": dval or 0.8,
+                             "diameter": _r(min(w, h)), "shape": "round", "rot": rot,
+                             "kicad_size": [_r(w), _r(h)]})
+            elif shape in ("oval", "roundrect") and abs(w - h) > 1e-3:
                 # Fusion pads cannot take a per-pad elongation: a LONG pad is
                 # `diameter` wide and (1 + psElongationLong) x long, set by the
                 # design rule (100 % by default). Keep the narrow side and turn the

@@ -88,9 +88,11 @@ def get_context() -> dict:
 
 
 @tool(READ)
-def list_designs() -> dict:
-    """Electronics designs in the active Fusion project (name, folder, version)."""
-    return session.bridge.call("list_designs", timeout=120)
+def list_designs(folder: str | None = None) -> dict:
+    """Electronics designs and libraries in the active Fusion project's top folder, or in one
+    folder path ('Live tests', 'Parts/Connectors'); folders are not searched recursively (walking
+    a big project's folder tree froze Fusion)."""
+    return session.bridge.call("list_designs", {"folder": folder}, timeout=120)
 
 
 @tool(ADDITIVE)
@@ -885,6 +887,446 @@ def route_pair(p_net: str, n_net: str, centreline_mm: list[list[float]], width_m
     return {"written": True, "detail": detail, "plan": plan}
 
 
+@tool(ADDITIVE)
+def route_trace(from_pad: str, to_pad: str, width_mm: float = 0.25, layer: str = "any",
+                allow_vias: bool = True, clearance_mm: float | None = None, via_drill_mm: float = 0.3,
+                via_diameter_mm: float = 0.6, grid_mm: float = 0.127, dry_run: bool = True) -> dict:
+    """Route one connection between two pads (PART.PAD, e.g. 'J1.A19' to 'J9.5') the way a person
+    would: straight runs, 45-degree corners (no 90s), around other nets' copper with the design's
+    clearance (or clearance_mm), keepouts and the board edge, ending exactly on the pad centres.
+    layer: 'top' / 'bottom' to prefer one layer, 'any' to let it choose; vias only where needed
+    (allow_vias=false forbids them). dry_run=true (default) returns the plan and a picture without
+    writing; run again with dry_run=false to draw it (checked against the board afterwards)."""
+    from fusion_offline import router as RT
+    from fusion_offline.render import render
+    snap = _snap(schematic=False)
+    root = D.read_xml(snap.board_xml)
+    a_ref, _, a_pad = from_pad.partition(".")
+    b_ref, _, b_pad = to_pad.partition(".")
+    ax, ay, al, an = RT.pad_target(root, a_ref, a_pad)
+    bx, by, bl, bn = RT.pad_target(root, b_ref, b_pad)
+    if an != bn or an is None:
+        raise ValueError(f"{from_pad} is on {an!r} and {to_pad} on {bn!r}: not the same net")
+    pref = {"top": 1, "bottom": 16}.get(str(layer).lower())
+    if pref and not allow_vias:
+        al, bl = tuple(l for l in al if l == pref) or al, tuple(l for l in bl if l == pref) or bl
+    r = RT.route(root, an, (ax, ay), al, (bx, by), bl, width=width_mm, clearance=clearance_mm,
+                 prefer_layer=pref, vias=allow_vias, via_drill=via_drill_mm, via_d=via_diameter_mm, step=grid_mm)
+    plan = {"p": {"net": an, "traces": [{"layer": l, "points": [list(q) for q in pts]} for l, pts in r.legs],
+                  "vias": [list(v) for v in r.vias]}, "n": {"net": "", "traces": [], "vias": []}}
+    out = {"route": r.as_dict(), "written": False}
+    xs = [q[0] for _, pts in r.legs for q in pts] + [ax, bx]
+    ys = [q[1] for _, pts in r.legs for q in pts] + [ay, by]
+    with contextlib.suppress(Exception):
+        pic = render(root, os.path.join(tempfile_dir(), "fusion-electronics-mcp-route.png"), highlight=f"^{re.escape(an)}$",
+                     region=(min(xs) - 4, min(ys) - 4, max(xs) + 4, max(ys) + 4), plans=[plan],
+                     title=f"{an}: {from_pad} -> {to_pad} (plan)")
+        out["picture"] = pic["path"]
+    if dry_run or r.problems or not r.legs:
+        return out
+    wmap = {1: _write_layer("top"), 16: _write_layer("bottom")}
+    cmds = ["GRID MM; SET WIRE_BEND 2;"]
+    for l, pts, w in r.pieces(width_mm):
+        cmds.append(C.add_trace(an, wmap[l], w, pts))
+    for vx, vy in r.vias:
+        cmds.append(C.add_via(an, vx, vy, via_drill_mm, via_diameter_mm))
+    cmds.append("SET WIRE_BEND 1;")
+
+    def verify(before, after):
+        bad = []
+        for l, pts in r.legs:
+            missing, _ = _uncovered(after, an, wmap[l], pts)
+            if missing:
+                bad.append(f"not covered near {missing[:2]}")
+        s = after.board().signals.get(an)
+        for vx, vy in r.vias:
+            if not (s and any(math.isclose(v.x, vx, abs_tol=1e-3) and math.isclose(v.y, vy, abs_tol=1e-3) for v in s.vias)):
+                bad.append(f"via missing at ({vx}, {vy})")
+        return (not bad), ("; ".join(bad) if bad else f"{an} {from_pad} -> {to_pad}: {r.length_mm:.1f} mm, {len(r.vias)} vias")
+    after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False)
+    out.update(written=True, detail=detail, routing=_routing_state(after))
+    return out
+
+
+@tool(ADDITIVE)
+def route_net(net: str, width_mm: float = 0.25, layer: str = "any", allow_vias: bool = True,
+              clearance_mm: float | None = None, max_steps: int = 20, dry_run: bool = True) -> dict:
+    """Route a whole net with route_trace's router, one airwire at a time, shortest first: each
+    connection starts at a pad still unconnected and ends on the nearer of its partner pad or any
+    copper the net already has (a tap), so the net grows as a tidy tree. Each step is written and
+    checked before the next is planned; stops when the net has no airwires (pours count as copper).
+    dry_run=true (default) plans only the first connection and returns its picture."""
+    from fusion_offline import router as RT
+    from fusion_offline import stitch as ST
+    pref = {"top": 1, "bottom": 16}.get(str(layer).lower())
+    steps = []
+    for _ in range(max_steps):
+        snap = _snap(schematic=False)
+        root = D.read_xml(snap.board_xml)
+        sig = next((x for x in root.iterfind(".//signals/signal") if x.get("name") == net), None)
+        if sig is None:
+            raise ValueError(f"no net {net!r} on the board")
+        air = [(float(w.get("x1")), float(w.get("y1")), float(w.get("x2")), float(w.get("y2")))
+               for w in sig.iterfind("wire") if w.get("layer") == "19"]
+        if not air:
+            break
+        air.sort(key=lambda a: math.hypot(a[2] - a[0], a[3] - a[1]))
+        pads = {}
+        for c in sig.iterfind("contactref"):
+            with contextlib.suppress(KeyError):
+                x, y, ls, _ = RT.pad_target(root, c.get("element"), c.get("pad"))
+                pads[(round(x, 3), round(y, 3))] = (f"{c.get('element')}.{c.get('pad')}", ls)
+        # a pad is "wired" when one of the net's traces ends on it: start from the other end
+        ends_at = {(round(float(w.get(k1)), 3), round(float(w.get(k2)), 3)) for w in sig.iterfind("wire")
+                   if w.get("layer") != "19" for k1, k2 in (("x1", "y1"), ("x2", "y2"))}
+        plan = None
+        for x1, y1, x2, y2 in air:
+            k1, k2 = (round(x1, 3), round(y1, 3)), (round(x2, 3), round(y2, 3))
+            ends = [pads.get(k1) if k1 not in ends_at else None, pads.get(k2) if k2 not in ends_at else None]
+            exclude = set()
+            if not ends[0] and not ends[1]:
+                # both ends already have copper (two pieces of the net): start from the end of one
+                # piece and keep the router from tapping that same piece
+                exclude, s_layers = RT.fragment(root, net, (x1, y1))
+                ends[0] = (pads.get(k1, (f"({x1:.2f}, {y1:.2f})", None))[0], s_layers)
+            (sx, sy, s_end), (gx, gy, g_end) = ((x1, y1, ends[0]), (x2, y2, pads.get(k2))) if ends[0] else ((x2, y2, ends[1]), (x1, y1, pads.get(k1)))
+            sl = s_end[1]
+            # an airwire that ends on a trace: finish on that trace's layer
+            gl = g_end[1] if g_end else RT.fragment(root, net, (gx, gy))[1]
+            if pref and not allow_vias:
+                sl = tuple(l for l in sl if l == pref) or sl
+                gl = tuple(l for l in gl if l == pref) or gl
+            r = RT.route(root, net, (sx, sy), sl, (gx, gy), gl, width=width_mm, clearance=clearance_mm,
+                         prefer_layer=pref, vias=allow_vias, join_existing=True, tap_exclude=exclude)
+            if r.legs and not r.problems:
+                plan = (s_end[0], g_end[0] if g_end else f"({gx:.2f}, {gy:.2f})", r)
+                break
+            steps.append({"from": s_end[0], "problems": r.problems})
+        if plan is None:
+            break
+        a, b, r = plan
+        if dry_run:
+            from fusion_offline.render import render
+            pl = {"p": {"net": net, "traces": [{"layer": l, "points": [list(q) for q in pts]} for l, pts in r.legs],
+                        "vias": [list(v) for v in r.vias]}, "n": {"net": "", "traces": [], "vias": []}}
+            xs = [q[0] for _, pts in r.legs for q in pts]
+            ys = [q[1] for _, pts in r.legs for q in pts]
+            pic = render(root, os.path.join(tempfile_dir(), "fusion-electronics-mcp-route.png"), highlight=f"^{re.escape(net)}$",
+                         region=(min(xs) - 4, min(ys) - 4, max(xs) + 4, max(ys) + 4), plans=[pl], title=f"{net}: next {a} -> {b}")
+            return {"written": False, "next": {"from": a, "to": b, **r.as_dict()}, "airwires": len(air),
+                    "picture": pic["path"], "skipped": steps}
+        wmap = {1: _write_layer("top"), 16: _write_layer("bottom")}
+        cmds = ["GRID MM; SET WIRE_BEND 2;"] + [C.add_trace(net, wmap[l], w, pts) for l, pts, w in r.pieces(width_mm)] +                [C.add_via(net, vx, vy, 0.3, 0.6) for vx, vy in r.vias] + ["SET WIRE_BEND 1;"]
+        n_air = len(air)
+
+        def verify(before, after, n_air=n_air):
+            s1 = after.board().signals.get(net)
+            left = sum(1 for w in s1.wires if w.layer == 19) if s1 else 0
+            joints = _layer_joints(after, {net})
+            if joints:
+                return False, f"{net}: top and bottom traces meet without a via at {joints[:3]}"
+            return left < n_air, f"{net}: airwires {n_air} -> {left}"
+        after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False)
+        steps.append({"from": a, "to": b, "length_mm": round(r.length_mm, 2), "vias": len(r.vias),
+                      "ends_on": r.joined, "detail": detail})
+    final = _routing_state(_snap(schematic=False))
+    return {"written": not dry_run, "net": net, "steps": steps,
+            "net_done": net not in final["unrouted_nets"], "routing": final}
+
+
+@tool(ADDITIVE)
+def route_close(max_len_mm: float = 8.0, width_mm: float = 0.25, widths: dict[str, float] | None = None,
+                allow_vias: bool = False, dry_run: bool = False) -> dict:
+    """Route every short connection at once: each airwire up to max_len_mm (local hops: passives
+    to their pins, LED + resistor, bootstrap caps), shortest first, with route_trace's router and
+    no vias by default. widths: {net regex: mm} for power nets (e.g. {"^3V3|^12V|^SW$": 0.5}).
+    Planned one after another on a working copy (each sees the ones before), written as one undo
+    step and checked. Connections it cannot make cleanly are listed and left for later."""
+    import copy
+    from fusion_offline import router as RT
+    snap = _snap(schematic=False)
+    root = copy.deepcopy(D.read_xml(snap.board_xml))
+    sigs = {x.get("name"): x for x in root.iterfind(".//signals/signal")}
+    pads = {}
+    for name, sig in sigs.items():
+        for c in sig.iterfind("contactref"):
+            with contextlib.suppress(KeyError):
+                x, y, ls, _ = RT.pad_target(root, c.get("element"), c.get("pad"))
+                pads[(name, round(x, 3), round(y, 3))] = (f"{c.get('element')}.{c.get('pad')}", ls)
+    air = []
+    pour_nets = {name for name, sig in sigs.items() if sig.find("polygon") is not None}
+    for name, sig in sigs.items():
+        if name in pour_nets:                 # their pours and vias connect them, not traces
+            continue
+        for w in sig.iterfind("wire"):
+            if w.get("layer") == "19":
+                a = (float(w.get("x1")), float(w.get("y1")))
+                b = (float(w.get("x2")), float(w.get("y2")))
+                if math.dist(a, b) <= max_len_mm:
+                    air.append((math.dist(a, b), name, a, b))
+    air.sort()
+    width_of = lambda n: next((w for pat, w in (widths or {}).items() if re.search(pat, n)), width_mm)
+    done, skipped = [], []
+    wired = set()                             # (net, x, y) of pads a trace (planned or existing) ends on
+    for name, sig in sigs.items():
+        for w in sig.iterfind("wire"):
+            if w.get("layer") != "19":
+                for k in (("x1", "y1"), ("x2", "y2")):
+                    wired.add((name, round(float(w.get(k[0])), 3), round(float(w.get(k[1])), 3)))
+    for L, net, a, b in air:
+        ka, kb = (net, round(a[0], 3), round(a[1], 3)), (net, round(b[0], 3), round(b[1], 3))
+        pa, pb = pads.get(ka), pads.get(kb)
+        if not pa and not pb:
+            skipped.append({"net": net, "why": "neither end is a pad"})
+            continue
+        # start from an end that has no copper yet: a start already on a trace just "taps" itself
+        if pa and ka not in wired:
+            (s_pt, s_pad), (g_pt, g_pad) = (a, pa), (b, pb)
+        elif pb and kb not in wired:
+            (s_pt, s_pad), (g_pt, g_pad) = (b, pb), (a, pa)
+        else:
+            skipped.append({"net": net, "why": "both ends already have copper; left for the router"})
+            continue
+        w = width_of(net)
+        r = RT.route(root, net, s_pt, s_pad[1], g_pt, g_pad[1] if g_pad else (1, 16), width=w,
+                     vias=allow_vias, join_existing=True)
+        if r.problems or not r.legs:
+            skipped.append({"net": net, "from": s_pad[0], "to": g_pad[0] if g_pad else str(g_pt), "why": r.problems[:1]})
+            continue
+        for l, pts, lw in r.pieces(w):        # into the working copy: later routes see it
+            wired.add((net, round(pts[0][0], 3), round(pts[0][1], 3)))
+            wired.add((net, round(pts[-1][0], 3), round(pts[-1][1], 3)))
+            for p, q in zip(pts, pts[1:]):
+                ET.SubElement(sigs[net], "wire", {"x1": str(p[0]), "y1": str(p[1]), "x2": str(q[0]), "y2": str(q[1]),
+                                                  "width": str(lw), "layer": str(l)})
+        for vx, vy in r.vias:
+            ET.SubElement(sigs[net], "via", {"x": str(vx), "y": str(vy), "extent": "1-16", "drill": "0.3", "diameter": "0.6"})
+        done.append((net, s_pad[0], g_pad[0] if g_pad else str(g_pt), w, r))
+    out = {"routed": [{"net": n, "from": a, "to": b, "width_mm": w, "length_mm": round(r.length_mm, 2), "vias": len(r.vias)}
+                      for n, a, b, w, r in done], "skipped": skipped}
+    if dry_run or not done:
+        return {"written": False, **out}
+    wmap = {1: _write_layer("top"), 16: _write_layer("bottom")}
+    cmds = ["GRID MM; SET WIRE_BEND 2;"]
+    for n, a, b, w, r in done:
+        cmds += [C.add_trace(n, wmap[l], lw, pts).replace("GRID MM; ", "") for l, pts, lw in r.pieces(w)]
+        cmds += [C.add_via(n, vx, vy, 0.3, 0.6).replace("GRID MM; ", "") for vx, vy in r.vias]
+    cmds.append("SET WIRE_BEND 1;")
+    before_air = _routing_state(snap)["unrouted_connections"]
+
+    def verify(before, after):
+        left = _routing_state(after)["unrouted_connections"]
+        joints = _layer_joints(after, {n for n, *_ in done})
+        if joints:
+            return False, f"top and bottom traces meet without a via at {joints[:3]}"
+        return left <= before_air - len(done), f"airwires {before_air} -> {left} ({len(done)} routed)"
+    after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False, timeout=600)
+    return {"written": True, "detail": detail, **out, "routing": _routing_state(after)}
+
+
+@tool(ADDITIVE)
+def route_remaining(width_mm: float = 0.25, widths: dict[str, float] | None = None, nets: list[str] | None = None,
+                    allow_vias: bool = True, include_pour_nets: bool = False, dry_run: bool = True) -> dict:
+    """The free-router step (after pours, GND vias, close hops, fan-outs and bus lanes): route every
+    connection still unrouted, shortest first, with rip-up and reroute when one is blocked (only
+    traces laid in this run are ever ripped; existing routing stays). Routes are 45-degree, keep
+    clear of connector pin fields, and cost extra to run through other nets' power pours (a via is
+    usually cheaper). widths: {net regex: mm} for power nets. Nets with pours are left to their
+    pours unless include_pour_nets. dry_run=true (default) plans offline and returns a picture;
+    dry_run=false writes it all as one undo step, checked (airwires drop, no layer change without a via)."""
+    from fusion_offline import route_all as RA, router as RT
+    from fusion_offline.render import render
+    snap = _snap(schematic=False)
+    root = D.read_xml(snap.board_xml)
+    width_of = lambda n: next((w for pat, w in (widths or {}).items() if re.search(pat, n)), width_mm)
+    pads = {}
+    for sg in root.iterfind(".//signals/signal"):
+        for c in sg.iterfind("contactref"):
+            with contextlib.suppress(KeyError):
+                x, y, ls, _ = RT.pad_target(root, c.get("element"), c.get("pad"))
+                pads[(sg.get("name"), round(x, 3), round(y, 3))] = (f"{c.get('element')}.{c.get('pad')}", ls)
+    conns = []
+    for sg in root.iterfind(".//signals/signal"):
+        n = sg.get("name")
+        if (nets and n not in nets) or (not include_pour_nets and sg.find("polygon") is not None):
+            continue
+        for k, w in enumerate(sg.iterfind("wire")):
+            if w.get("layer") != "19":
+                continue
+            a = (float(w.get("x1")), float(w.get("y1")))
+            b = (float(w.get("x2")), float(w.get("y2")))
+            pa, pb = pads.get((n, round(a[0], 3), round(a[1], 3))), pads.get((n, round(b[0], 3), round(b[1], 3)))
+            la = pa[1] if pa else RT.fragment(root, n, a)[1]
+            lb = pb[1] if pb else RT.fragment(root, n, b)[1]
+            (s_, sl, sp), (g_, gl, gp) = ((a, la, pa), (b, lb, pb)) if (pa or not pb) else ((b, lb, pb), (a, la, pa))
+            conns.append(RA.Conn(f"{n}#{k}", n, s_, sl, g_, gl, width_of(n),
+                                 f"{sp[0] if sp else s_} -> {gp[0] if gp else g_}"))
+    conns.sort(key=lambda c: math.dist(c.start, c.goal))
+    res = RA.route_all(root, conns, vias=allow_vias)
+    by_id = {c.id: c for c in conns}
+    out = {"planned": len(res.routes), "connections": len(conns), "rips": res.rips,
+           "failed": {by_id[k].label: v for k, v in res.failed.items()},
+           "length_mm": round(sum(r.length_mm for r in res.routes.values()), 1),
+           "vias": sum(len(r.vias) for r in res.routes.values()), "written": False}
+    with contextlib.suppress(Exception):
+        work = res.root
+        for el in work.iter():
+            el.attrib.pop("mcp_conn", None)
+        out["picture"] = render(work, os.path.join(tempfile_dir(), "fusion-electronics-mcp-route-remaining.png"),
+                                title="route_remaining (plan)")["path"]
+    if dry_run or not res.routes:
+        return out
+    wmap = {1: _write_layer("top"), 16: _write_layer("bottom")}
+    cmds = ["GRID MM; SET WIRE_BEND 2;"]
+    for cid, r in res.routes.items():
+        c = by_id[cid]
+        cmds += [C.add_trace(c.net, wmap[l], w, pts).replace("GRID MM; ", "") for l, pts, w in r.pieces(c.width)]
+        cmds += [C.add_via(c.net, vx, vy, 0.3, 0.6).replace("GRID MM; ", "") for vx, vy in r.vias]
+    cmds.append("SET WIRE_BEND 1;")
+    before_air = _routing_state(snap)["unrouted_connections"]
+
+    def verify(before, after):
+        joints = _layer_joints(after, {by_id[i].net for i in res.routes})
+        if joints:
+            return False, f"top and bottom traces meet without a via at {joints[:3]}"
+        left = _routing_state(after)["unrouted_connections"]
+        return left <= before_air - len(res.routes), f"airwires {before_air} -> {left} ({len(res.routes)} routed)"
+    after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False, timeout=900)
+    out.update(written=True, detail=detail, routing=_routing_state(after))
+    return out
+
+
+def _board_netlist(root) -> dict:
+    """{'parts': {ref: {'pads': [...], 'footprint', 'value'}}, 'nets': {net: [(ref, pad)]}} from a board export."""
+    parts, nets = {}, {}
+    for el in root.iterfind("./drawing/board/elements/element"):
+        parts[el.get("name")] = {"pads": [], "footprint": el.get("package", ""), "value": el.get("value", "")}
+    for sg in root.iterfind("./drawing/board/signals/signal"):
+        for c in sg.iterfind("contactref"):
+            nets.setdefault(sg.get("name"), []).append((c.get("element"), c.get("pad")))
+            if c.get("element") in parts:
+                parts[c.get("element")]["pads"].append(c.get("pad"))
+    return {"parts": {r: p for r, p in parts.items() if p["pads"]}, "nets": nets}
+
+
+@tool(CHANGE)
+def place_clusters(fixed: list[str] | None = None, keep: list[str] | None = None, dry_run: bool = True) -> dict:
+    """Place passives around the part they serve, by rule (the user's patterns: pin -> part -> rail
+    and series parts along the pin's escape, tees too, decaps standing across the column first,
+    bridges along the package edge, chains such as LED + resistor following the part they hang
+    off; connector pins at a board edge escape into the board). Main parts (ICs, connectors) and
+    `fixed` never move; `keep` lists members to leave where they are (hand-made power stages,
+    deliberate rows). dry_run=true (default) returns the moves and a before/after picture; then
+    run with dry_run=false to move them (one undo step). Traces on moved parts' nets are not moved:
+    rip them up first (not pour nets) and re-route with route_close."""
+    from fusion_offline import cluster_place as CP, sch_plan as SP
+    from fusion_offline.render import render
+    snap = _snap(schematic=False)
+    root = D.read_xml(snap.board_xml)
+    nl = _board_netlist(root)
+    plan = SP.plan(nl)
+    P = CP.solve(root, plan["blocks"], set(plan["rails"]), fixed=set(fixed or ()), keep=set(keep or ()))
+    moves = {r: {"x": m[0], "y": m[1], "rot": m[2], "role": P.roles.get(r)} for r, m in sorted(P.moves.items())}
+    out = {"moves": moves, "not_placed": P.misses}
+    with contextlib.suppress(Exception):
+        out["picture"] = render(CP.applied(root, P), os.path.join(tempfile_dir(), "fusion-electronics-mcp-placement.png"),
+                                traces=False, title="place_clusters (plan)")["path"]
+    if dry_run or not moves:
+        return {"written": False, **out}
+    cmds = ["GRID MM;"]
+    for r, m in moves.items():
+        cmds.append(C.move_part(r, m["x"], m["y"]).replace("GRID MM; ", ""))
+        cmds.append(C.rotate_part(r, m["rot"], False).replace("GRID MM; ", ""))
+
+    def verify(before, after):
+        here = {e.name: e for e in after.fab().elements}
+        bad = [r for r, m in moves.items() if r not in here or not (math.isclose(here[r].x, m["x"], abs_tol=1e-3)
+               and math.isclose(here[r].y, m["y"], abs_tol=1e-3) and math.isclose(here[r].angle % 360, m["rot"] % 360, abs_tol=0.05))]
+        return not bad, (f"moved {len(moves)} parts" if not bad else f"not where planned: {bad[:8]}")
+    after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False, timeout=300)
+    return {"written": True, "detail": detail, **out}
+
+
+@tool(ADDITIVE)
+def lay_bus(nets: list[str], path_mm: list[list[float]], pitch_mm: float = 0.6, width_mm: float = 0.25,
+            layer: str = "bottom", dry_run: bool = True) -> dict:
+    """Lay a bus: one lane per net, side by side along a path you choose ([[x, y], ...], 45-degree
+    corners), lane 0 on the path and lane i offset i * pitch to the LEFT of travel, each lane
+    trimmed to the stretch its own pins span. Order `nets` so the taps at the ends cross as little
+    as possible. Then join each pin to its lane with route_net (taps; vias where a tap must cross
+    other lanes). Checked against other nets' copper, holes, keepouts and the lanes' own pitch;
+    nothing is written if a lane conflicts. dry_run=true (default) returns the plan and a picture."""
+    from fusion_offline import bus as BU, router as RT
+    from fusion_offline.render import render
+    snap = _snap(schematic=False)
+    root = D.read_xml(snap.board_xml)
+    lay = 16 if str(layer).lower() == "bottom" else 1
+    pins = {}
+    for sg in root.iterfind(".//signals/signal"):
+        if sg.get("name") in nets:
+            for c in sg.iterfind("contactref"):
+                with contextlib.suppress(KeyError):
+                    x, y, _, _ = RT.pad_target(root, c.get("element"), c.get("pad"))
+                    pins.setdefault(sg.get("name"), []).append((x, y))
+    plan = BU.plan_bus(root, nets, path_mm, pitch_mm, width_mm, lay, pins)
+    pl = {"p": {"net": "", "traces": [{"layer": lay, "points": [list(q) for q in ln["points"]]} for ln in plan["lanes"]],
+                "vias": []}, "n": {"net": "", "traces": [], "vias": []}}
+    out = {"lanes": [{"net": ln["net"], "from": ln["points"][0], "to": ln["points"][-1]} for ln in plan["lanes"]],
+           "problems": plan["problems"], "written": False}
+    with contextlib.suppress(Exception):
+        xs = [p[0] for ln in plan["lanes"] for p in ln["points"]]
+        ys = [p[1] for ln in plan["lanes"] for p in ln["points"]]
+        out["picture"] = render(root, os.path.join(tempfile_dir(), "fusion-electronics-mcp-bus.png"),
+                                region=(min(xs) - 6, min(ys) - 6, max(xs) + 6, max(ys) + 6), plans=[pl],
+                                title="lay_bus (plan)")["path"]
+    if dry_run or plan["problems"]:
+        return out
+    wl = _write_layer(layer)
+    cmds = ["GRID MM; SET WIRE_BEND 2;"] + [C.add_trace(ln["net"], wl, width_mm, ln["points"]).replace("GRID MM; ", "")
+                                            for ln in plan["lanes"]] + ["SET WIRE_BEND 1;"]
+
+    def verify(before, after):
+        bad = [ln["net"] for ln in plan["lanes"] if _uncovered(after, ln["net"], wl, ln["points"])[0]]
+        return not bad, (f"{len(plan['lanes'])} lanes laid" if not bad else f"lanes not as drawn: {bad}")
+    after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False)
+    out.update(written=True, detail=detail)
+    return out
+
+
+def _layer_joints(snap, nets=None) -> list[str]:
+    """Places where a top trace and a bottom trace of a net meet with no via or through-hole pad
+    there. Fusion's airwire count can treat these as connected, so the routing
+    tools check for them explicitly."""
+    from fusion_offline import router as RT
+    root = D.read_xml(snap.board_xml)
+    k = lambda x, y: (round(float(x), 3), round(float(y), 3))
+    out = []
+    for sig in root.iterfind(".//signals/signal"):
+        n = sig.get("name")
+        if nets is not None and n not in nets:
+            continue
+        ends = {}
+        for w in sig.iterfind("wire"):
+            if w.get("layer") in ("1", "16"):
+                for p in (k(w.get("x1"), w.get("y1")), k(w.get("x2"), w.get("y2"))):
+                    ends.setdefault(p, set()).add(w.get("layer"))
+        if not any(len(v) > 1 for v in ends.values()):
+            continue
+        ok = {k(v.get("x"), v.get("y")) for v in sig.iterfind("via")}
+        for c in sig.iterfind("contactref"):
+            with contextlib.suppress(KeyError):
+                x, y, ls, _ = RT.pad_target(root, c.get("element"), c.get("pad"))
+                if len(ls) > 1:
+                    ok.add(k(x, y))
+        out += [f"{n} at {p}" for p, ls in ends.items() if len(ls) > 1 and p not in ok]
+    return out
+
+
+def tempfile_dir() -> str:
+    import tempfile
+    return tempfile.gettempdir()
+
+
 @tool(CHANGE)
 def set_board_outline(width_mm: float, height_mm: float, x0_mm: float = 0.0, y0_mm: float = 0.0,
                       replace: bool = False) -> dict:
@@ -1053,7 +1495,8 @@ FORM_UNROUTE_DONE = {"title": r"^UNROUTE$", "requires": [], "actions": [{"do": "
 @tool(CHANGE)
 def rip_up(nets: list[str] | None = None) -> dict:
     """Remove routed traces and vias (they become unrouted connections again). Polygons/pours are
-    kept. Without `nets`, rips up the whole board."""
+    kept, BUT a ripped-up net's pours stay unfilled afterwards (RATSNEST does not refill them on
+    2705.1.15): avoid ripping up nets that have pours, or re-add their pours after."""
     names = " ".join(C.q(n) for n in (nets or []))
     cmd = f"RIPUP {names};" if names else "RIPUP;"
 
@@ -1077,14 +1520,18 @@ def _poly_cmd(pts) -> str:
 @tool(ADDITIVE)
 def add_pour(net: str, layer: str | int = "top", points_mm: list[list[float]] | None = None,
              inset_mm: float = 0.0, isolate_mm: float = 0.25, width_mm: float = 0.25,
-             thermal_width_mm: float = 0.3) -> dict:
+             thermal_width_mm: float = 0.3, rank: int = 1) -> dict:
     """Add a copper pour (polygon) on a net, e.g. a GND plane. Without points it follows the board
     outline (inset_mm = 0): the copper-to-edge distance then comes from the design rule for board
     edge clearance, as EAGLE intends. Note the outline wire is width_mm wide and centred on the
     vertices, so an inset moves copper only inset - width/2 from the edge. isolate_mm is the
     clearance to other copper. thermal_width_mm is the width of the thermal-relief spokes joining
     pads to the pour (Fusion's default is a thin 0.1524 mm; the gap comes from the design rule
-    slThermalIsolate). Respects keepouts (add_keepout); filled immediately."""
+    slThermalIsolate). rank sets priority where pours of different nets overlap on a layer: rank 1
+    wins and is cut out of higher ranks (e.g. output islands rank 1 inside a rank 3 GND plane).
+    Respects keepouts (add_keepout); filled immediately."""
+    if not 1 <= int(rank) <= 6:
+        raise ValueError("rank is 1 (highest priority) to 6")
     wl = _write_layer(layer)
     if points_mm:
         pts = [(float(p[0]), float(p[1])) for p in points_mm]
@@ -1095,9 +1542,11 @@ def add_pour(net: str, layer: str | int = "top", points_mm: list[list[float]] | 
         x0, y0, x1, y1 = o
         pts = [(x0 + inset_mm, y0 + inset_mm), (x1 - inset_mm, y0 + inset_mm),
                (x1 - inset_mm, y1 - inset_mm), (x0 + inset_mm, y1 - inset_mm)]
+    # straight bends: a diagonal edge would otherwise be drawn as a 45-degree jog
     cmd = (f"GRID MM; CHANGE POUR SOLID; CHANGE ISOLATE {C.n(isolate_mm)}; CHANGE ORPHANS OFF; "
-           f"CHANGE THERMALS ON; CHANGE THERMALWIDTH {C.n(thermal_width_mm)}; LAYER {wl}; "
-           f"POLYGON {C.q(net)} {C.n(width_mm)} {_poly_cmd(pts)}; RATSNEST;")
+           f"CHANGE THERMALS ON; CHANGE THERMALWIDTH {C.n(thermal_width_mm)}; CHANGE RANK {int(rank)}; "
+           f"LAYER {wl}; SET WIRE_BEND 2; POLYGON {C.q(net)} {C.n(width_mm)} {_poly_cmd(pts)}; "
+           f"SET WIRE_BEND 1; RATSNEST;")
 
     def count(sn):
         root = D.read_xml(sn.board_xml)
@@ -1180,15 +1629,20 @@ def add_keepout(x_mm: float, y_mm: float, radius_mm: float,
 
 @tool(ADDITIVE)
 def stitch_vias(net: str = "GND", pitch_mm: float = 2.0, drill_mm: float | None = None,
-                max_vias: int = 400, keep_away_mm: dict[str, float] | None = None, dry_run: bool = False) -> dict:
+                max_vias: int = 400, keep_away_mm: dict[str, float] | None = None, under_parts: str | None = None,
+                dry_run: bool = False) -> dict:
     """Via stitching for a net's pours: vias on a grid wherever they clear other nets' copper, every
     pad (no via-in-pad), holes, keepouts and the board edge, using the design's clearance and
     drill rules. keep_away_mm: {net regex: mm} keeps vias further from some nets' copper, e.g.
     {"^ETH|^USB_D": 0.6} to keep ground as far from impedance pairs as their pours are.
+    under_parts: refdes regex of parts vias may go under, e.g. "J[0-9]+" for big through-hole
+    connectors: under the body (an overhang to the board edge) but not in the pin field (the
+    pads' box + 2 mm); other parts stay via-free.
     One call places them all (one undo step). dry_run=true only plans."""
     from fusion_offline import stitch as ST
     snap = _snap(schematic=False)
-    plan = ST.plan_stitching(D.read_xml(snap.board_xml), net, pitch_mm, drill_mm, keep_away=keep_away_mm)
+    plan = ST.plan_stitching(D.read_xml(snap.board_xml), net, pitch_mm, drill_mm, keep_away=keep_away_mm,
+                             under_parts=under_parts)
     vias = plan["vias"][:max_vias]
     if dry_run or not vias:
         return {"ok": True, "planned": len(vias), **{k: v for k, v in plan.items() if k != "vias"},
@@ -1241,31 +1695,102 @@ def fanout_pad(ref: str, pad: str, layer: str = "top", trace_width_mm: float = 0
     return {"ok": True, "detail": detail, "net": net, "via": plan["via"]}
 
 
+@tool(ADDITIVE)
+def ground_vias(net: str = "GND", max_dist_mm: float = 1.5, trace_width_mm: float = 0.3,
+                skip: list[str] | None = None, dry_run: bool = False) -> dict:
+    """A via next to every SMD pad on a plane net (GND by default): a short trace from the pad to
+    the nearest clear via spot (never via-in-pad), tying the pad to the plane on the other layer.
+    Planned one pad at a time so the vias keep clear of each other; all written as one undo step.
+    skip: pads to leave out ('U1.4'). Through-hole pads are skipped (they reach both layers)."""
+    import copy
+    from fusion_offline import stitch as ST
+    from fusion_offline import router as RT
+    snap = _snap(schematic=False)
+    root = copy.deepcopy(D.read_xml(snap.board_xml))
+    sig = next((x for x in root.iterfind(".//signals/signal") if x.get("name") == net), None)
+    if sig is None:
+        raise ValueError(f"no net {net!r}")
+    skip = set(skip or [])
+    wired = {(round(float(w.get(a)), 3), round(float(w.get(b)), 3)) for w in sig.iterfind("wire")
+             if w.get("layer") != "19" for a, b in (("x1", "y1"), ("x2", "y2"))}
+    plans, missed = [], []
+    for c in sig.findall("contactref"):
+        name = f"{c.get('element')}.{c.get('pad')}"
+        if name in skip:
+            continue
+        with contextlib.suppress(KeyError):
+            x, y, layers, _ = RT.pad_target(root, c.get("element"), c.get("pad"))
+            if len(layers) > 1 or (round(x, 3), round(y, 3)) in wired:   # through-hole, or already has its via
+                continue
+            plan = ST.plan_fanout(root, c.get("element"), c.get("pad"), net, trace_width_mm, max_dist_mm, step=0.1)
+            if plan is None:
+                missed.append(name)
+                continue
+            plans.append((name, layers[0], plan))
+            v = ET.SubElement(sig, "via", {"x": str(plan["via"][0]), "y": str(plan["via"][1]),
+                                           "extent": "1-16", "drill": str(plan["drill"]), "diameter": str(plan["diameter"])})
+            ET.SubElement(sig, "wire", {"x1": str(plan["from"][0]), "y1": str(plan["from"][1]), "x2": str(plan["via"][0]),
+                                        "y2": str(plan["via"][1]), "width": str(trace_width_mm), "layer": str(layers[0])})
+    out = {"planned": len(plans), "no_spot": missed,
+           "vias": [{"pad": n, "via": p["via"], "trace_mm": p["distance"]} for n, _, p in plans]}
+    if dry_run or not plans:
+        return {"written": False, **out}
+    wmap = {1: _write_layer("top"), 16: _write_layer("bottom")}
+    cmds = ["GRID MM;"]
+    for n, l, p in plans:
+        cmds.append(C.add_trace(net, wmap[l], trace_width_mm, [p["from"], p["via"]]).replace("GRID MM; ", ""))
+        cmds.append(C.add_via(net, p["via"][0], p["via"][1], p["drill"], p["diameter"]).replace("GRID MM; ", ""))
+    n0 = len(snap.board().signals[net].vias)
+
+    def verify(before, after):
+        got = len(after.board().signals[net].vias) - n0
+        return got == len(plans), f"{got}/{len(plans)} {net} vias placed by their pads"
+    after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False, timeout=600)
+    return {"written": True, "detail": detail, **out, "routing": _routing_state(after)}
+
+
 def _seg_near(sb: dict, x: float, y: float, tol: float) -> bool:
     from fusion_offline import stitch as ST
     return ST.Obstacle("seg", None, False, (sb["x1"], sb["y1"], sb["x2"], sb["y2"], 0.0)).distance(x, y) <= tol
 
 
 @tool(CHANGE)
-def remove_stubs(max_rounds: int = 5) -> dict:
-    """Fix the trace stubs Fusion's DRC reports. A stub whose loose end lies on a same-net pad
-    (Fusion re-anchors trace ends off-centre when a part rotates) is SNAPPED to the pad centre;
-    a truly dangling segment is deleted. Only DRC-reported stubs are touched, and every change is
-    verified, so a real connection is never removed."""
+def remove_stubs(max_rounds: int = 5, geometric: bool = True) -> dict:
+    """Fix trace stubs. A stub whose loose end lies on a same-net pad (Fusion re-anchors trace
+    ends off-centre when a part rotates) is SNAPPED to the pad centre; a truly dangling end is cut
+    back to the last place something joins the segment (a tap, a via), or the segment is deleted
+    when nothing joins it before its other end. Fusion's DRC does not report every stub (a bus
+    lane's tail past its last tap passes it), so with geometric=true (default) the board's copper
+    is also checked directly. Every change is verified, and the run stops if the number of
+    unrouted connections goes up, so a real connection is never removed."""
     from fusion_offline import stitch as ST
     fixed = []
+    start_air = _routing_state(_snap(schematic=False))["unrouted_connections"]
     for _ in range(max_rounds):
         session.run("DRC;", "board")
         drc = [(e.get("x_mm"), e.get("y_mm")) for e in session.errors("board")["errors"]
                if e.get("description") == "Wire Stub" and e.get("x_mm") is not None]
-        if not drc:
-            break
         snap = _snap(schematic=False)
         cands = [sb for sb in ST.stub_candidates(D.read_xml(snap.board_xml))
-                 if any(_seg_near(sb, x, y, 0.05) for x, y in drc)]
+                 if any(_seg_near(sb, x, y, 0.05) for x, y in drc) or (geometric and not sb["on_pad"])]
         if not cands:
             break
         for sb in cands:
+            if not sb["on_pad"] and sb.get("keep_to"):
+                # something joins the segment part-way: keep it up to there
+                wl = _write_layer("bottom") if sb["layer"] == 16 else sb["layer"]
+                dx, dy = sb["dangling"]
+                ox, oy = (sb["x1"], sb["y1"]) if (sb["x2"], sb["y2"]) == (dx, dy) else (sb["x2"], sb["y2"])
+                _delete_segment(sb, wl)
+                add_trace(sb["net"], wl, sb["width"], [[ox, oy], list(sb["keep_to"])])
+                fixed.append({"net": sb["net"], "action": "cut back to its last tap",
+                              "removed_mm": round(math.dist(sb["keep_to"], (dx, dy)), 3)})
+                if _routing_state(_snap(schematic=False))["unrouted_connections"] > start_air:
+                    session.undo("board")
+                    session.undo("board")
+                    fixed[-1]["action"] = "undone: it was carrying a connection"
+                    return {"ok": False, "fixed": fixed}
+                continue
             wl = _write_layer("bottom") if sb["layer"] == 16 else sb["layer"]
             dx, dy = sb["dangling"]
             ox, oy = (sb["x1"], sb["y1"]) if (sb["x2"], sb["y2"]) == (dx, dy) else (sb["x2"], sb["y2"])
@@ -1285,6 +1810,10 @@ def remove_stubs(max_rounds: int = 5) -> dict:
             _delete_segment(sb, wl)
             fixed.append({"net": sb["net"], "action": "snapped to pad centre" if sb["on_pad"] else "deleted",
                           "length_mm": sb["length"]})
+            if _routing_state(_snap(schematic=False))["unrouted_connections"] > start_air:
+                session.undo("board")
+                fixed[-1]["action"] = "undone: it was carrying a connection"
+                return {"ok": False, "fixed": fixed}
     _ensure_view()
     session.run("DRC;", "board")
     left = sum(1 for e in session.errors("board")["errors"] if e.get("description") == "Wire Stub")
@@ -1360,17 +1889,32 @@ def clean_vias(net: str = "GND") -> dict:
 
 @tool(ADDITIVE)
 def attach_3d_model(package: str, step_path: str, offset_mm: list[float] | None = None,
-                    rotation_deg: list[float] | None = None, folder: str = "3D Packages") -> dict:
+                    rotation_deg: list[float] | None = None, folder: str = "3D Packages",
+                    name: str | None = None, allow_below_board: bool = False) -> dict:
     """Give a package in the OPEN library a 3D model from a STEP file. The model is placed in the
     footprint's frame (KiCad library models need no offset; pass offset_mm [x, y, z] and
     rotation_deg [rx, ry, rz] when a model's origin differs), saved as a 3D package document in
     the project's `folder`, and linked to the package. Checks that the model sits over the pads.
-    Save the library afterwards (save_design)."""
+
+    The model must stand on the board: more of it above the board than below (pins may go
+    through), else nothing is saved and the call fails (allow_below_board=true for a part that
+    really hangs below, e.g. a through-board connector): fix rotation_deg (KiCad's 3D rotation
+    signs are the opposite of Fusion's; vendor STEPs are often Y-up and need +90 about X).
+    If the package already has a 3D model, the new model's file gets a versioned name
+    (<package>_V2, ...) so the files in `folder` stay distinguishable. Boards that already use the
+    package keep their old model until refreshed: save the library (save_design), then on each
+    board run update_from_libraries(refresh_parts=[one part per device]) and push_3d."""
+    if name is None:
+        name = _next_3d_name(package)
     res = session.bridge.call("create_package3d", {"package": package, "step_path": step_path,
                                                     "offset_mm": offset_mm, "rotation_deg": rotation_deg,
-                                                    "folder": folder}, timeout=300,
-                              answers=[(r"If you don't save", "Save")])
+                                                    "folder": folder, "doc_name": name,
+                                                    "require_up": not allow_below_board},
+                              timeout=300, answers=[(r"If you don't save", "Save")])
     mb, pb = res.get("model_bbox_mm"), res.get("pad_bbox_mm")
+    if mb and not allow_below_board and (mb[5] <= 0.2 or -mb[2] > mb[5]):   # an older add-in saves unchecked
+        raise WriteFailed(f"the model spans z {mb[2]} to {mb[5]} mm: mostly below the board, upside down; "
+                          f"fix rotation_deg (it was saved by an older add-in: replace it). {res}")
     if mb and pb:
         mcx, mcy = (mb[0] + mb[3]) / 2, (mb[1] + mb[4]) / 2
         pcx, pcy = (pb[0] + pb[3]) / 2, (pb[1] + pb[4]) / 2     # both boxes: min xyz, max xyz
@@ -1378,9 +1922,41 @@ def attach_3d_model(package: str, step_path: str, offset_mm: list[float] | None 
         res["model_vs_pads_center_mm"] = [round(mcx - pcx, 3), round(mcy - pcy, 3)]
         if not overlap:
             res["warning"] = "the model does not overlap the pads; check offset/rotation before using it"
-    if not any(res["package"] in d["packages3d"] for d in res.get("devices", [])):
+    linked = [n for d in res.get("devices", []) for n in d["packages3d"]]
+    if not linked or (name and name not in linked and res["package"] not in linked):
         raise WriteFailed(f"the 3D package was created but is not linked to {package}: {res}")
-    return {"ok": True, **res}
+    return {"ok": True, **res, "next": "save_design; then on each board update_from_libraries(refresh_parts=[...]) and push_3d"}
+
+
+def _next_3d_name(package: str) -> str | None:
+    """None (use the package name) for a package without a 3D model yet, else the next free
+    <package>_V<n>."""
+    try:
+        devs = session.bridge.call("lib_device3d", {"match": package}, timeout=60).get("devices", [])
+    except Exception:
+        return None
+    names = {n for d in devs if d.get("package", "").upper() == package.upper() for n in d.get("packages3d", [])}
+    if not names:
+        return None
+    vers = [int(m.group(1)) for n in names if (m := re.match(re.escape(package) + r"_V(\d+)$", n, re.I))]
+    return f"{package}_V{max(vers + [1]) + 1}"
+
+@tool(READ)
+def list_design_rules(copy_to: str | None = None) -> dict:
+    """Design-rule (.edru) and stackup (.estackup) files shipped with this server for common fab
+    processes (every JLCPCB 4- and 6-layer impedance stackup, and a 2-layer 1.6 mm board; built
+    from JLC's published tables by tools/gen_jlc_stackups.py): copper layers, board thickness,
+    dielectrics (thickness, Er) and the key clearances of each. Fusion cannot load rules from a
+    script: load a .edru in the DRC dialog (Rules > Load; it carries its stackup too) or a
+    .estackup in the Layer Stack Manager. copy_to copies the files into a folder you can reach
+    from Fusion's file dialog (e.g. Downloads)."""
+    from . import rules_lib
+    out = {"rule_sets": rules_lib.catalog(),
+           "how_to_load": "Fusion: DRC (Rules) > Load > pick the .edru; it sets the rules and the layer stackup. "
+                          "Save the design afterwards: the working copy refreshes only after a save."}
+    if copy_to:
+        out["copied"] = rules_lib.copy_to(copy_to)
+    return out
 
 
 @tool(READ)
@@ -1395,8 +1971,8 @@ def get_design_rules() -> dict:
     vals = {k: (_re.search(r'name="' + k + r'" value="([^"]*)"', x) or [None, None])[1] for k in keys}
     warn = []
     if vals.get("mdCopperDimension") in ("40mil", "1.016mm"):
-        warn.append("board edge clearance is the 40 mil Fusion default; JLC needs only 0.3 mm. Set the rules "
-                    "(DRC dialog > load .edru) before pouring or routing")
+        warn.append("board edge clearance is the 40 mil Fusion default; JLC needs only 0.3 mm. Load a rule set "
+                    "before pouring or routing: list_design_rules shows the bundled JLC .edru files")
     if vals.get("msDrill") == "0.35mm":
         warn.append("minimum drill is the 0.35 mm default; check it against your fab")
     return {"params": vals, "warnings": warn}
@@ -1522,16 +2098,33 @@ def suggest_placement_moves(exclude_nets: list[str] = ["GND"], fixed: list[str] 
 
 @tool(ADDITIVE)
 def import_netlist_from_kicad(pcb_path: str, part_map: dict[str, str], sheet: int = 1,
-                              skip: list[str] | None = None, dry_run: bool = False) -> dict:
-    """Build the schematic connectivity of a KiCad board in this design: place each part and connect
-    every net (named stubs with labels), using pad numbers. part_map maps a KiCad refdes OR footprint
+                              skip: list[str] | None = None, dry_run: bool = False, style: str = "blocks",
+                              pad_map: dict[str, dict[str, str]] | None = None,
+                              ground_symbol: str | None = None, power_symbol: str | None = None,
+                              frame: str | None = None, preview_only: bool = False) -> dict:
+    """Build the schematic of a KiCad board in this design. part_map maps a KiCad refdes OR footprint
     name to 'DEVICE@LIBRARY' (device = device set + variant), e.g. {"R1": "RES_0402_1K_1%@MY_PASSIVES",
-    "RJ45-TH_RJSAE538402": "CONN_RJ45_2X1_HC-RJ45-059A@MCP Library"}. Parts already in the schematic
-    are reused. Mounting holes (no pads) are skipped; add them on the board with add_hole.
+    "RJ45-TH_RJSAE538402": "CONN_RJ45_2X1_HC-RJ45-059A@MCP Library"}. Mounting holes (no pads) are
+    skipped; add them on the board with add_hole.
+
+    style="blocks" (default) draws a reviewable schematic: each IC/connector with its passives wired
+    to it (series parts inline, caps and pull-ups hanging off the net, LED/FET drivers stacked), labels
+    only on nets that leave a block, ground and rails as power symbols, blocks packed onto framed
+    sheets. It needs ground_symbol and power_symbol ('DEVICE@LIBRARY'; a power symbol whose net name
+    follows its value, e.g. GPLIB's bars) or FUSION_MCP_GROUND_SYMBOL / FUSION_MCP_POWER_SYMBOL, and
+    frame or FUSION_MCP_SHEET_FRAME for new sheets. pad_map translates KiCad pad names to library pad
+    names where they differ, by refdes or footprint ({"D_SMB": {"1": "C", "2": "A"}}; one-pad parts
+    map themselves). preview_only=true lays it out and writes an HTML preview without drawing it
+    (parts are added once to read their symbols, then removed). Every pin is checked afterwards.
+    style="grid" places parts in rows with a labelled stub on every pin (the old behaviour).
     dry_run=true reports the plan without changing anything."""
     from fusion_offline import kicad_pcb as KP
     with open(pcb_path, encoding="utf-8") as f:
         nl = KP.read_netlist(f.read())
+    if style == "blocks":
+        return _import_blocks(nl, part_map, skip, dry_run, pad_map, ground_symbol, power_symbol, frame, preview_only)
+    if style != "grid":
+        raise ValueError("style is 'blocks' or 'grid'")
     skip = set(skip or [])
     parts = {r: p for r, p in nl["parts"].items() if p["pads"] and r not in skip}
     unmapped = sorted(r for r, p in parts.items() if r not in part_map and p["footprint"] not in part_map)
@@ -1571,23 +2164,184 @@ def import_netlist_from_kicad(pcb_path: str, part_map: dict[str, str], sheet: in
             "failed_nets": failed}
 
 
+def _import_blocks(nl, part_map, skip, dry_run, pad_map, ground_symbol, power_symbol, frame, preview_only) -> dict:
+    from . import data_dir, sch_blocks as SB
+    bs = SB.BlockSchematic(nl, part_map, pad_map, skip)
+    plan = {"blocks": [{"anchor": b["anchor"], "members": b["members"], "labelled_nets": b["external_nets"]}
+                       for b in bs.plan["blocks"]], "rails": bs.plan["rails"], "unassigned": bs.plan["unassigned"]}
+    if dry_run:
+        return {"ok": True, "applied": False, "parts": len(bs.parts), **plan}
+    gnd = ground_symbol or os.environ.get("FUSION_MCP_GROUND_SYMBOL")
+    pwr = power_symbol or os.environ.get("FUSION_MCP_POWER_SYMBOL")
+    frame = frame or os.environ.get("FUSION_MCP_SHEET_FRAME")
+    if not gnd or not pwr:
+        raise ValueError("blocks style needs ground_symbol and power_symbol ('DEVICE@LIBRARY'), "
+                         "or FUSION_MCP_GROUND_SYMBOL / FUSION_MCP_POWER_SYMBOL")
+    session.activate("schematic")
+    sch = _snap(board=False).schematic()
+    clash = sorted(set(bs.parts) & set(sch.parts))
+    if clash:
+        raise ValueError(f"already in the schematic: {clash[:20]}; the blocks style draws a fresh schematic "
+                         "(delete them first, or use style='grid')")
+    supplies = [SB.split(gnd), SB.split(pwr)]
+    script, staged = bs.stage_script(set(sch.parts), supplies)
+    session.run_script(script, "schematic")
+    try:
+        libgeo = SB.library_geometry(D.read_xml(session.export("schematic")))
+    finally:
+        session.run_script(C.GRID + " EDIT .s1; " + " ".join(f"DELETE {C.q(r)};" for r in staged), "schematic")
+    missing = sorted({f"{d}@{l}" for d, l in bs.spec.values() if (d, l) not in libgeo})
+    if missing:
+        raise ValueError(f"could not read these devices back (check names): {missing}")
+    geo = {r: libgeo[k] for r, k in bs.spec.items()}
+    supply_geo = {"gnd": libgeo[SB.split(gnd)], "bar": libgeo[SB.split(pwr)]}
+    sheets, checks, notes, where = bs.layout(geo, supply_geo)
+    os.makedirs(data_dir("previews"), exist_ok=True)
+    preview = bs.preview(sheets, geo, supply_geo, data_dir("previews", "schematic-blocks.html"))
+    bad = {sh: {k: v for k, v in c.items() if v and k in ("wrong", "missing", "shorts", "pin_on_wire", "wire_touch", "unlinked")}
+           for sh, c in checks.items()}
+    bad = {sh: v for sh, v in bad.items() if v}
+    report = {"parts": len(bs.parts), "sheets": len(sheets), "blocks_on_sheets": where, "preview": preview,
+              "layout_problems": bad, "crossings": sum(c["crossings"] for c in checks.values()),
+              "overlaps": [o for c in checks.values() for o in c["overlaps"]][:20], "notes": notes, **plan}
+    if preview_only or bad:
+        return {"ok": not bad, "applied": False, **report}
+    sch = _snap(board=False).schematic()
+    first = 1 + max([int(m.group(1)) for p in sch.parts if (m := re.match(r"SUPPLY(\d+)$", p))] or [0])
+    power = {"gnd": SB.split(gnd), "bar": SB.split(pwr), "rails": {}, "geo": supply_geo}
+    place, names = bs.place_script(sheets, sch.sheets, frame, power, first)
+    has_frame = frame and any(p.deviceset + p.device == SB.split(frame)[0] for p in sch.parts.values())
+    interrupted = []
+
+    def run(cmd):
+        # a dialog the watchdog had to cancel stops an EAGLE script part-way: report it
+        res = session.bridge.call("run_script", {"script": cmd, "editor": "schematic"}, timeout=240,
+                                  forms=[dialogs.FORM_SUPPLY_VALUE],
+                                  # VALUE on one power symbol: change only this one, not every
+                                  # symbol with the old value
+                                  answers=[(r"change all supply components with value", "No")])
+        interrupted.extend(f"{d.get('title')}: {d.get('text')}"[:120] for d in res.get("dialogs") or []
+                           if not d.get("expected"))
+
+    for i, (sh, cmd) in enumerate(place):
+        if i == 0 and sh == 1 and frame and not has_frame:
+            cmd += f" ADD {C.q(frame)} 'FRAME1' R0 (0 0);"
+        run(cmd)
+    for sh, cmd in bs.wire_scripts(sheets):
+        run(cmd)
+    result = bs.verify(_snap(board=False).schematic())
+    after = _snap(board=False).schematic()
+    placed_supplies = sum(1 for p in after.parts if p in names)
+    ok = result["ok"] and not interrupted and placed_supplies == len(names)
+    return {"ok": ok, "applied": True, "check": result, "power_symbols": f"{placed_supplies}/{len(names)}",
+            "interrupted_by_dialogs": interrupted, **report}
+
+
+@tool(ADDITIVE)
+def import_routing_from_kicad(pcb_path: str, nets: list[str] | None = None, vias: bool = True,
+                              dry_run: bool = False) -> dict:
+    """Copy a KiCad board's tracks, arcs and vias into this board (same frame as
+    import_placement_from_kicad: origin at the board's bottom-left, y up), as one undo step.
+    Run import_placement_from_kicad first so pads line up. nets limits it to those nets; vias=false
+    skips vias. Every segment is checked against the board read back from Fusion. Pours are not
+    copied (use add_pour). Import BEFORE adding pours: with pours on the board Fusion refills them
+    after every via, and 490 vias kept it busy for over 40 minutes (2705.1.15). dry_run=true only
+    counts what would be drawn."""
+    from fusion_offline import kicad_pcb as KP
+    from .sch_blocks import safe_net
+    with open(pcb_path, encoding="utf-8") as f:
+        r = KP.read_routing(f.read())
+    want = set(nets) if nets else None
+    keep = lambda n: n and (want is None or n in want)
+    segs = [(safe_net(n), *rest) for n, *rest in r["segments"] if keep(n)]
+    arcs = [(safe_net(n), *rest) for n, *rest in r["arcs"] if keep(n)]
+    vs = [(safe_net(n), *rest) for n, *rest in r["vias"] if keep(n)] if vias else []
+    snap = _snap(schematic=False)
+    have = set(snap.board().signals)
+    unknown = sorted({x[0] for x in segs + arcs + vs} - have)
+    plan = {"segments": len(segs), "arcs": len(arcs), "vias": len(vs), "nets": len({x[0] for x in segs + arcs + vs}),
+            "unknown_nets": unknown}
+    if dry_run or unknown:
+        if unknown and not dry_run:
+            raise ValueError(f"nets not on this board: {unknown[:12]}")
+        return {"ok": not unknown, "applied": False, **plan}
+    layers = {lay: _write_layer(lay) for lay in {x[1] for x in segs + arcs}}
+    cmds = ["GRID MM;", "SET WIRE_BEND 2;"]          # straight: arbitrary-angle segments stay as drawn
+    for net, lay, w, a, b in segs:
+        cmds.append(C.add_trace(net, layers[lay], w, [a, b]).replace("GRID MM; ", ""))
+    for net, lay, w, a, b, ang in arcs:
+        cmds.append(C.add_trace(net, layers[lay], w, [a, (b[0], b[1], ang)]).replace("GRID MM; ", ""))
+    for net, x, y, drill, size in vs:
+        cmds.append(C.add_via(net, x, y, drill, size))
+    cmds.append("SET WIRE_BEND 1;")
+    n_vias = {n: len(sg.vias) for n, sg in snap.board().signals.items()}
+
+    def verify(before, after):
+        b1 = after.board()
+        short = []
+        exp = {}
+        for net, *_ in vs:
+            exp[net] = exp.get(net, 0) + 1
+        for net, k in exp.items():
+            got = len(b1.signals[net].vias) - n_vias.get(net, 0)
+            if got < k:
+                short.append(f"{net}: {got}/{k} vias")
+        miss = []
+        for net, lay, w, a, b in segs:
+            m, _ = _uncovered(after, net, layers[lay], [a, b])
+            if m:
+                miss.append(f"{net} {lay} {a}->{b}")
+        ok = not short and not miss
+        return ok, (f"{len(segs)} segments, {len(arcs)} arcs, {len(vs)} vias drawn" if ok
+                    else f"not as drawn: {(short + miss)[:8]}")
+    after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False, timeout=900)
+    return {"ok": True, "applied": True, "detail": detail, **plan, "routing": _routing_state(after)}
+
+
 @tool(CHANGE)
-def import_placement_from_kicad(pcb_path: str, dry_run: bool = False, skip: list[str] | None = None) -> dict:
+def import_placement_from_kicad(pcb_path: str, dry_run: bool = False, skip: list[str] | None = None,
+                                fit_pads: bool = True) -> dict:
     """Place this board's parts where a KiCad board (.kicad_pcb) has them: position, rotation and
     side, matched by reference designator. KiCad's frame is converted (origin at the board's
-    bottom-left, y up; bottom parts at angle R become mirrored R + 180). All moves run in one
+    bottom-left, y up; bottom parts at angle R become mirrored 180 - R). All moves run in one
     verified command (one undo step) in Ignore Violators mode, so parts may sit over each other on
-    opposite sides. dry_run=true only reports the moves. Routing is not imported."""
+    opposite sides. dry_run=true only reports the moves. Routing is not imported.
+
+    fit_pads (default): each part is placed so its pads land on the KiCad board's pads (matched by
+    pad name, least squares), not by footprint origin and angle: a Fusion footprint whose origin
+    or pin-1 orientation differs (JLC's SOT-23-6 is turned 180 degrees from KiCad's, a header's
+    origin is pin 1 in one and the centre in the other) still lands right. Parts whose pads sit
+    more than 0.1 mm from KiCad's after the fit are listed under footprint_differs."""
     from fusion_offline import kicad_pcb as KP
     with open(pcb_path, encoding="utf-8") as f:
-        ref = KP.read_placement(f.read())
+        text = f.read()
+    ref = KP.read_placement(text)
     snap = _snap(schematic=False)
     here = {e.name: e for e in snap.fab().elements}
     skip = set(skip or [])
+    fitted, differs = {}, []
+    if fit_pads:
+        kpads = KP.read_pads(text)
+        board = D.read_xml(snap.board_xml).find("./drawing/board")
+        pkgs = {(lib.get("name"), pk.get("name")): pk for lib in board.iterfind("./libraries/library")
+                for pk in lib.iterfind("./packages/package")}
+        for el in board.iterfind("./elements/element"):
+            n = el.get("name")
+            pk = pkgs.get((el.get("library"), el.get("package")))
+            if n in skip or n not in kpads or pk is None:
+                continue
+            fit = KP.fit_pose(KP.package_pads(pk), kpads[n]["pads"], kpads[n]["bottom"])
+            if fit:
+                fitted[n] = fit
+                if fit["worst_mm"] > 0.1:
+                    differs.append({"ref": n, "worst_pad_offset_mm": fit["worst_mm"]})
     moves, same = [], []
     for name, p in sorted(ref["parts"].items()):
         if name in skip or name not in here:
             continue
+        if name in fitted:
+            f_ = fitted[name]
+            p = {**p, "x_mm": f_["x_mm"], "y_mm": f_["y_mm"], "angle": f_["angle"], "bottom": f_["mirror"]}
         e = here[name]
         if (math.isclose(e.x, p["x_mm"], abs_tol=1e-3) and math.isclose(e.y, p["y_mm"], abs_tol=1e-3)
                 and math.isclose(e.angle % 360, p["angle"] % 360, abs_tol=0.05) and e.mirror == p["bottom"]):
@@ -1599,7 +2353,8 @@ def import_placement_from_kicad(pcb_path: str, dry_run: bool = False, skip: list
                            "side": "bottom" if p["bottom"] else "top"} for n, p in moves],
               "already_placed": same,
               "only_in_kicad": sorted(set(ref["parts"]) - set(here) - skip),
-              "only_in_fusion": sorted(set(here) - set(ref["parts"]))}
+              "only_in_fusion": sorted(set(here) - set(ref["parts"])),
+              "placed_by_pads": len(fitted), "footprint_differs": differs}
     if dry_run or not moves:
         return {"ok": True, "applied": False, **report}
     cmd = " ".join(C.move_part(n, p["x_mm"], p["y_mm"]) + " " + C.rotate_part(n, p["angle"], p["bottom"])
@@ -1642,6 +2397,51 @@ def search_library(query: str) -> list[dict]:
     return library.search(query)
 
 
+@tool(ADDITIVE)
+def create_library_part(footprint_path: str, part_id: str, deviceset: str, prefix: str, value: str,
+                        jlc_code: str | None = None, pin_names: dict[str, str] | None = None,
+                        directions: dict[str, str] | None = None, description: str = "",
+                        jlc_native: bool = False, manufacturer: str = "", mpn: str = "",
+                        overwrite: bool = False) -> dict:
+    """Create a part in this server's component library from a KiCad footprint (.kicad_mod): from
+    KiCad's own libraries, or JLCPCB's footprint for a part exported with `easyeda2kicad --full
+    --lcsc_id=C...` (set jlc_native=true for those: no rotation correction needed at JLC). The
+    symbol is generated: two-pin passives get the standard symbols (resistor, capacitor, diode,
+    LED, ...), anything else a box with its pins (pin_names maps pad -> pin name, pads sharing a
+    name join one pin; directions maps pin name -> in/out/io/pwr/pas/oc). jlc_code (C-number)
+    fills JLCPCB, and MF/MP from cached EasyEDA data when not given. Then open your Fusion library
+    and run insert_library_part, save_design, attach_3d_model (with the part's STEP file)."""
+    from fusion_offline.kicad_import import footprint_to_part
+    from . import easyeda
+    with open(footprint_path, encoding="utf-8") as f:
+        text = f.read()
+    attrs = {"VALUE": value}
+    if jlc_code:
+        attrs["JLCPCB"] = jlc_code.strip().upper()
+        if not (manufacturer and mpn):
+            r = easyeda.cached(attrs["JLCPCB"]) or {}
+            c = ((r.get("dataStr") or {}).get("head") or {}).get("c_para") or {}
+            manufacturer = manufacturer or (c.get("Manufacturer") or "").split("(")[0]
+            mpn = mpn or c.get("Manufacturer Part") or ""
+    if manufacturer:
+        attrs["MF"] = manufacturer
+    if mpn:
+        attrs["MP"] = mpn
+    part, renames = footprint_to_part(text, part_id=part_id, deviceset=deviceset, prefix=prefix,
+                                      pin_names=pin_names, directions=directions, attributes=attrs,
+                                      jlc_native=jlc_native, description=description,
+                                      source=("easyeda " + attrs["JLCPCB"]) if jlc_native and jlc_code
+                                      else f"kicad footprint {os.path.basename(footprint_path)}")
+    path = library.add(part, overwrite=overwrite)
+    from . import std_symbols as SS
+    pk = part["package"]
+    return {"ok": True, "part_id": part_id, "file": path, "package": pk["name"],
+            "pads": len(pk.get("smds", [])) + len(pk.get("pads", [])), "holes": len(pk.get("holes", [])),
+            "pins": len(part["symbol"]["pins"]), "symbol_style": part["symbol"].get("style") or SS.infer_style(part),
+            "merged_pads": renames, "attributes": attrs,
+            "next": "open your Fusion library, then insert_library_part, save_design, attach_3d_model"}
+
+
 @tool(READ)
 def get_library_part(part_id: str) -> dict:
     """Full definition of one library part, including metadata (source, maintainer, link)."""
@@ -1652,7 +2452,13 @@ def get_library_part(part_id: str) -> dict:
 def insert_library_part(part_id: str) -> dict:
     """Build a library part into the Fusion library open in the library editor. Afterwards call
     save_design, then close_library, before placing it with add_part (placing from a library that
-    is still open can crash Fusion)."""
+    is still open can crash Fusion).
+
+    Two-pin passives (resistors, capacitors, inductors, ferrites, fuses, crystals, diodes, LEDs,
+    TVS) are drawn with this server's standard symbols, not the symbol the part came with from
+    EasyEDA or KiCad, so every schematic reads the same; set "style": false in the part to keep
+    its own symbol, or name a style ("res", "cap", "cap_pol", "inductor", "ferrite", "fuse",
+    "crystal", "diode", "schottky", "zener", "led", "tvs", "tvs_bidir")."""
     part = library.get(part_id)
     session.activate("library")
     from fusion_offline import design as D0
@@ -1687,10 +2493,16 @@ def insert_library_part(part_id: str) -> dict:
 
 
 @tool(CHANGE)
-def update_from_libraries() -> dict:
+def update_from_libraries(refresh_parts: list[str] | None = None) -> dict:
     """Update the open design from all its libraries (Fusion's 'Update all'): brings in library
     changes such as attributes (e.g. JLC-ROTATION / JLC-X-OFFSET / JLC-Y-OFFSET) and 3D packages.
-    Save the library and close it first. Reports which parts' attributes changed."""
+    Save the library and close it first.
+
+    'Update all' can leave parts on an old 3D model and report nothing to do (seen when a
+    package's model was replaced). refresh_parts (reference designators, one per device is enough, e.g. ["J3",
+    "J9"]) re-pulls those parts' devices from their library with REPLACE, accepting Fusion's
+    "a different version of device set ... update?" question (every part of that device follows).
+    Returns the attribute changes and every part's 3D model afterwards, listing parts with none."""
     def attrs(sn):
         root = D.read_xml(sn.board_xml)
         return {e.get("name"): {a.get("name"): a.get("value") for a in e.iterfind("attribute")}
@@ -1698,11 +2510,78 @@ def update_from_libraries() -> dict:
     session.activate("board")
     before = attrs(_snap(schematic=False))
     session.bridge.call("update_libraries", {}, timeout=300)
+    refreshed, unexpected = [], []
+    if refresh_parts:
+        snap = _snap(schematic=True)
+        broot, sroot = D.read_xml(snap.board_xml), D.read_xml(snap.sch_xml)
+        els = {e.get("name"): e for e in broot.iterfind(".//board/elements/element")}
+        parts = {p.get("name"): p for p in sroot.iterfind(".//parts/part")}
+        for ref in refresh_parts:
+            e, p = els.get(ref), parts.get(ref)
+            if e is None or p is None:
+                raise ValueError(f"no part {ref!r} on the board and schematic")
+            spec = f"{p.get('deviceset')}{p.get('device') or ''}@{p.get('library')}"
+            mirrored = (e.get("rot") or "").startswith("M")
+            pre, post = _only_layers([24 if mirrored else 23])     # pick the part by its origin
+            res = session.bridge.call("run", {"commands": f"GRID MM; {pre} REPLACE {C.q(spec)} "
+                                                          f"{C.pt(float(e.get('x')), float(e.get('y')))}; {post}",
+                                              "editor": "board"}, timeout=300,
+                                      answers=[(r"already present in this file and needs to be updated", "Yes")])
+            _ensure_view()
+            refreshed.append({"part": ref, "device": spec, "messages": res.get("messages")})
+            unexpected += [f"{d.get('title')}: {d.get('text')}"[:160] for d in res.get("dialogs") or []
+                           if not d.get("expected") and d.get("title") != "REPLACE"]
     after = attrs(_snap(schematic=False))
     changed = {ref: {k: v for k, v in a.items() if before.get(ref, {}).get(k) != v}
                for ref, a in after.items() if a != before.get(ref)}
-    return {"ok": True, "parts_changed": len(changed), "changes": changed}
+    out = {"ok": not unexpected, "parts_changed": len(changed), "changes": changed, "refreshed": refreshed,
+           "unexpected_dialogs": unexpected}
+    try:
+        els3d = session.bridge.call("elements3d", {}, timeout=60)["elements"]
+        out["models"] = {e["name"]: e["package3d"] for e in els3d}
+        out["parts_without_3d_model"] = sorted(e["name"] for e in els3d if not e["package3d"])
+    except Exception as ex:                      # add-in older than 0.13
+        out["models"] = f"not readable: {ex}"[:200]
+    out["next"] = "push_3d to bring the change into the 3D PCB"
+    return out
 
+
+@tool(CHANGE)
+def push_3d() -> dict:
+    """Bring the board's changes into its 3D PCB (creating the 3D PCB the first time, answering
+    Fusion's Push dialog), then check every part's model is on its own side of the board: a
+    top-side part mostly below the board (a model with the wrong up axis) is listed under
+    wrong_side. The first push needs the add-in transport (the built-in server ends a script by
+    cancelling any command still open)."""
+    session.activate("board")
+    res = session.bridge.call("push_3d", {}, timeout=900, forms=[dialogs.FORM_PUSH_3D])
+    return {"ok": True, **_side_check(res)}
+
+
+@tool(READ)
+def check_3d_models() -> dict:
+    """Check the open 3D PCB: every part's height range against the board's, listing parts whose
+    model sits on the wrong side (a top-side part hanging below the board, or the reverse)."""
+    return _side_check(session.bridge.call("pcb3d_bodies", {}, timeout=120))
+
+
+def _side_check(res: dict) -> dict:
+    board = res.get("board_z_mm")
+    mirrored = set()
+    with contextlib.suppress(Exception):
+        root = D.read_xml(_snap(schematic=False).board_xml)
+        mirrored = {e.get("name") for e in root.iterfind(".//board/elements/element")
+                    if (e.get("rot") or "").startswith("M")}
+    wrong = []
+    if board:
+        bot, top = board
+        for p in res.get("parts", []):
+            ref = p["occurrence"].rsplit(":", 1)[-1]
+            z0, z1 = p["z_mm"]
+            above, below = max(0.0, z1 - top), max(0.0, bot - z0)
+            if (ref in mirrored and above > below) or (ref not in mirrored and below > above):
+                wrong.append({"part": p["occurrence"], "z_mm": p["z_mm"], "board_z_mm": board})
+    return {**res, "wrong_side": wrong}
 
 @tool(CHANGE)
 def close_library(name: str) -> dict:

@@ -4,9 +4,14 @@ Two transports run the same operations (the add-in's op functions):
 - builtin: Fusion's own MCP server (127.0.0.1:27182) runs them as scripts;
   nothing to install in Fusion (see builtin.py);
 - addin: the FusionElectronicsMCP add-in's token-gated socket (bridge.json).
-FUSION_MCP_TRANSPORT=builtin|addin forces one; by default the built-in server
-is used when it answers. The dialog watchdog and the focus guard run here,
-around either transport.
+FUSION_MCP_TRANSPORT=builtin|addin forces one; by default the add-in is used
+when it is running and the built-in server otherwise. The add-in is the
+reliable one: on Fusion 2705 the built-in server does not save libraries (the
+call returns, nothing is written), stops answering after about a minute, and
+cancels any command still open at the end of a write, so steps that need a
+Fusion dialog answered cannot run through it. Those operations refuse to run
+on it (NEEDS_ADDIN) instead of quietly doing nothing. The dialog watchdog and
+the focus guard run here, around either transport.
 """
 
 from __future__ import annotations
@@ -40,6 +45,19 @@ class BridgeOpError(Exception):
 
 
 _BUILTIN = BuiltinClient()
+# operations the built-in server cannot do properly (see the module docstring)
+NEEDS_ADDIN = {"save", "push_3d"}
+
+
+def addin_running(info_path: str | None = None) -> bool:
+    """The add-in's socket (from bridge.json) accepts a connection."""
+    try:
+        with open(info_path or INFO_PATH, encoding="utf-8") as f:
+            port = int(json.load(f)["port"])
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except (OSError, ValueError, KeyError):
+        return False
 
 
 class Bridge:
@@ -55,6 +73,8 @@ class Bridge:
         mode = os.environ.get("FUSION_MCP_TRANSPORT", "auto").strip().lower()
         if mode in ("builtin", "addin"):
             return mode
+        if addin_running(self.info_path):
+            return "addin"
         return "builtin" if _BUILTIN.available() else "addin"
 
     def _info(self) -> dict:
@@ -90,6 +110,12 @@ class Bridge:
         Fusion notification toasts (its only error channel) are returned under
         "messages"."""
         mode = self.transport()
+        if mode == "builtin" and op in NEEDS_ADDIN:
+            raise BridgeOpError("needs_addin",
+                                f"'{op}' needs the FusionElectronicsMCP add-in: Fusion's built-in MCP server "
+                                "does not do it reliably (library saves are silently dropped; Fusion's dialogs "
+                                "are cancelled). Install it with `fusion-electronics-mcp install-addin` and run it "
+                                "from Utilities > Add-Ins.")
         info = self._info()
         if info.get("protocol") != PROTOCOL:
             raise BridgeUnavailable(f"add-in protocol {info.get('protocol')} != server protocol {PROTOCOL}; "

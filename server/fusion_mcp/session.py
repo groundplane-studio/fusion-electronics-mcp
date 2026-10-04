@@ -93,11 +93,20 @@ class Session:
         return f"GRID MM 0.0001; {body} GRID LAST;"
 
     def run(self, commands: str, editor: str, answers: list[tuple[str, str]] | None = None,
-            forms: list[dict] | None = None, timeout: float = 60.0) -> dict:
+            forms: list[dict] | None = None, timeout: float = 60.0, check_dialogs: bool = True) -> dict:
         commands = self.with_grid(commands)
         self.activate(editor)
-        return self.bridge.call("run", {"commands": commands, "editor": editor}, answers=answers, forms=forms,
-                                timeout=timeout)
+        res = self.bridge.call("run", {"commands": commands, "editor": editor}, answers=answers, forms=forms,
+                               timeout=timeout)
+        # a question nobody expected got the watchdog's safe answer (No / Cancel): the command most
+        # likely did not do what was meant, so say so instead of carrying on (a "different version
+        # of device set ... update?" answered No silently blocked a library update, 2026-10-04)
+        unexpected = [d for d in (res or {}).get("dialogs") or [] if not d.get("expected")]
+        if unexpected and check_dialogs:
+            raise WriteFailed("Fusion asked something this call did not expect and it got the safe answer: "
+                              + "; ".join(describe(d) for d in unexpected)
+                              + f". Check the design; commands sent: {commands}")
+        return res
 
     def run_script(self, script: str, editor: str) -> dict:
         return self.bridge.call("run_script", {"script": script, "editor": editor}, timeout=180)
@@ -119,7 +128,15 @@ class Session:
         Dialogs Fusion raised (and how they were answered) are included in
         the error so the agent learns why."""
         before = self.snapshot(board, schematic)
-        res = self.run(commands, editor, answers=answers, forms=forms, timeout=timeout) or {}
+        pre, commands, post = split_settings(commands)
+        if pre:                                   # editor settings (e.g. SET WIRE_BEND) cannot be grouped:
+            self.run(pre, editor, timeout=30)     # sent on their own, so the write stays ONE undo step
+        try:
+            # verified_write reports and undoes on unexpected dialogs itself
+            res = self.run(commands, editor, answers=answers, forms=forms, timeout=timeout, check_dialogs=False) or {}
+        finally:
+            if post:
+                self.run(post, editor, timeout=30)
         shown = list(res.get("dialogs", []))
         messages = list(res.get("messages", []))
         after = self.snapshot(board, schematic)
@@ -141,3 +158,25 @@ class Session:
             how = "Nothing was changed"
         reason = detail if not ok else "an unexpected dialog appeared"
         raise WriteFailed(f"{reason}{note}. {how}. Commands sent: {commands}")
+
+
+def split_settings(commands: str) -> tuple[str, str, str]:
+    """(leading SETs, the rest, trailing SETs). The add-in cannot group a write containing
+    SET into one undo step (SET is in its NO_GROUP list), and a SET in the middle of a write
+    then left a multi-step write that one UNDO only partly reverted. Leading
+    and trailing SETs are pulled out; a SET in the middle is moved to the front, as these are
+    editor settings (wire bend) meant for the whole write."""
+    parts = [c.strip() for c in commands.split(";") if c.strip()]
+    is_set = lambda c: c.split(None, 1)[0].upper() == "SET"
+    body = [c for c in parts if not is_set(c)]
+    sets = [c for c in parts if is_set(c)]
+    if not sets:
+        return "", commands, ""
+    pre, post, seen = [], [], set()
+    for c in sets:                    # first value of a setting applies to the write, a later one restores it
+        key = " ".join(c.split()[:2]).upper()
+        (post if key in seen else pre).append(c)
+        seen.add(key)
+    j = lambda xs: " ".join(c + ";" for c in xs)
+    return j(pre), j(body), j(post)
+

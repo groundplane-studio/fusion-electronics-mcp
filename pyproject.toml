@@ -8,8 +8,9 @@ version = "0.2.0"
 description = "MCP server that lets AI agents read and edit Autodesk Fusion Electronics designs"
 readme = "README.md"
 license = "MIT"
+authors = [{ name = "Ground Plane Studio, LLC" }]
 requires-python = ">=3.12"
-dependencies = ["mcp==2.2.0"]
+dependencies = ["mcp==2.2.0", "numpy>=1.26"]
 
 [project.optional-dependencies]
 render = ["matplotlib>=3.8"]
@@ -24,4 +25,4 @@ Homepage = "https://github.com/groundplane-studio/fusion-electronics-mcp"
 where = ["offline", "server"]
 
 [tool.setuptools.package-data]
-fusion_mcp = ["addin/FusionElectronicsMCP/*.py", "addin/FusionElectronicsMCP/*.manifest"]
+fusion_mcp = ["addin/FusionElectronicsMCP/*.py", "addin/FusionElectronicsMCP/*.manifest", "data/*.json", "data/rules/*.edru", "data/stackups/*.estackup"]

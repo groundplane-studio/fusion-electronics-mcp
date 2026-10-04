@@ -56,10 +56,13 @@ def render(root: ET.Element, out_path: str, highlight: str | None = None, traces
     for o in obs:
         if not o.is_pad and o.kind == "circle" and o.net is None:
             continue
-        if o.kind == "seg" or (not o.is_pad and o.kind == "circle"):
+        if not o.is_pad and o.kind in ("seg", "circle"):
             continue  # traces and vias are drawn from the signals below
         c = col.get(o.net, (0.75, 0.75, 0.75)) if o.net else (0.5, 0.5, 0.5)
-        if o.kind == "circle":
+        if o.kind == "seg":                     # oblong pad
+            x1_, y1_, x2_, y2_, hw = o.data
+            ax.plot([x1_, x2_], [y1_, y2_], "-", color=c, lw=2 * hw * pt_per_mm, solid_capstyle="round")
+        elif o.kind == "circle":
             ax.add_patch(Circle(o.data[:2], o.data[2], fc=c, ec="k", lw=0.3))
         else:
             cx, cy, hw, hh, a = o.data
