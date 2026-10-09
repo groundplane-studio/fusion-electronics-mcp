@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.3.0)
+## 0.3.0 (2026-10-09)
 
 From laying out the PoE Magnetics Test Board (RJ45, magnetics, CM4) in
 October 2026. Every write stays verified and one undo step; new write tools
