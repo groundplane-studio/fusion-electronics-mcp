@@ -65,5 +65,19 @@ class RememberFolderTest(unittest.TestCase):
         self.assertIn("'Boards/Rock'", str(cm.exception))
 
 
+
+class OtherProjectTest(RememberFolderTest):
+    def test_design_in_another_project_says_which(self):
+        doc = Doc("Rock", "design", folder="Boards/Rock")
+        doc.dataFile.parentProject = types.SimpleNamespace(name="Electronics MCP")
+        self.addin._docs = lambda: [doc]
+        self.addin.op_open_design({"name": "Rock"})
+        self.addin._docs = lambda: []
+        with self.assertRaises(self.addin.BridgeError) as cm:
+            self.addin.op_open_design({"name": "Rock"})
+        self.assertIn("'Electronics MCP'", str(cm.exception))
+        self.assertEqual(self.listed, [])                # no slow listing at all
+
+
 if __name__ == "__main__":
     unittest.main()

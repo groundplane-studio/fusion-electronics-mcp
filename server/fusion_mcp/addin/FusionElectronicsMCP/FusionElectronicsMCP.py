@@ -34,7 +34,7 @@ import uuid
 import adsk.core  # type: ignore
 import adsk.electron  # type: ignore
 
-ADDIN_VERSION = "0.14.4"
+ADDIN_VERSION = "0.14.5"
 PROTOCOL = 1
 EVENT_ID = "fusion_electronics_mcp_bridge"
 DEFAULT_TIMEOUT = 60.0
@@ -659,6 +659,11 @@ def op_open_design(args):
         project = None
     cand = []
     if folder is None:                         # name only: try the folder it was found in last time
+        elsewhere = sorted({k.split("|", 1)[0] for k in _folders() if k.endswith(f"|{ext}|{name}")} - {project})
+        if elsewhere and f"{project}|{ext}|{name}" not in _folders():
+            raise BridgeError("not_found", f"{name!r} was last seen in project {', '.join(map(repr, elsewhere))}, not the "
+                              f"active project {project!r}. Make that project active in Fusion's Data Panel (other "
+                              "projects are never listed: that froze Fusion), or open the design by hand.")
         last = _folders().get(f"{project}|{ext}|{name}")
         if last is not None:
             with contextlib.suppress(BridgeError):
