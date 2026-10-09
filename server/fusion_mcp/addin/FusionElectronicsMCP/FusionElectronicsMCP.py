@@ -34,7 +34,7 @@ import uuid
 import adsk.core  # type: ignore
 import adsk.electron  # type: ignore
 
-ADDIN_VERSION = "0.14.3"
+ADDIN_VERSION = "0.14.4"
 PROTOCOL = 1
 EVENT_ID = "fusion_electronics_mcp_bridge"
 DEFAULT_TIMEOUT = 60.0
@@ -1071,10 +1071,27 @@ def _accept(sock):
         threading.Thread(target=_serve_conn, args=(conn,), daemon=True).start()
 
 
+# Two copies of the add-in (say the installed one and one added from a source folder) share
+# EVENT_ID and bridge.json: the second unregisters the first one's event while its server is
+# still listening, and stopping either deletes the other's bridge.json. One copy runs at a time.
+_OWNER_ATTR = "_fusion_electronics_mcp_owner"
+
+
+def _other_copy():
+    owner = getattr(adsk.core, _OWNER_ATTR, None)
+    return owner if owner and os.path.normcase(owner) != os.path.normcase(os.path.abspath(__file__)) else None
+
+
 def run(context):
     global _app, _ui, _event, _handler, _server, _token
     _app = adsk.core.Application.get()
     _ui = _app.userInterface
+    other = _other_copy()
+    if other:
+        _ui.messageBox("Another copy of the Fusion Electronics MCP add-in is already running:\n" + other
+                       + "\n\nStop that one in Scripts and Add-Ins first (and untick its Run on Startup); "
+                       "this copy was not started.", "Fusion Electronics MCP")
+        return
     try:
         with contextlib.suppress(Exception):
             _app.unregisterCustomEvent(EVENT_ID)
@@ -1092,11 +1109,14 @@ def run(context):
                        "protocol": PROTOCOL, "addin_version": ADDIN_VERSION,
                        "started": time.strftime("%Y-%m-%dT%H:%M:%S")}, f)
         threading.Thread(target=_accept, args=(_server,), daemon=True).start()
+        setattr(adsk.core, _OWNER_ATTR, os.path.abspath(__file__))
     except Exception:
         _ui.messageBox(traceback.format_exc(), "Fusion Electronics MCP failed to start")
 
 
 def stop(context):
+    if _other_copy() or _server is None:      # not the running copy: leave the other one alone
+        return
     _stop.set()
     with contextlib.suppress(Exception):
         _server.close()
@@ -1105,6 +1125,11 @@ def stop(context):
             _event.remove(_handler)
         _app.unregisterCustomEvent(EVENT_ID)
     with contextlib.suppress(Exception):
-        os.remove(INFO_PATH)
+        with open(INFO_PATH, encoding="utf-8") as f:
+            mine = json.load(f).get("token") == _token
+        if mine:
+            os.remove(INFO_PATH)
+    with contextlib.suppress(Exception):
+        delattr(adsk.core, _OWNER_ATTR)
     with contextlib.suppress(Exception):
         shutil.rmtree(WORK_DIR, ignore_errors=True)

@@ -100,6 +100,9 @@ take `design=` and refuse when Fusion's active design is another one.
 - `open_design` by name alone tries the folder the design was last found or seen open in before
   the project's top folder (listing a big project's top folder can time out), and when it does
   time out it names the folders it knows (add-in 0.14.3).
+- Only one copy of the add-in runs in a Fusion process (say the installed copy and one added
+  from a source folder): a second copy refuses to start and says where the running one is, and
+  stopping a copy no longer deletes the running copy's connection file (add-in 0.14.4).
 - Hardening: rule files are written only to the rules folder, the temp folder, Downloads or
   Documents; the add-in allows AUTO SAVE / LOAD only for files in the temp folder ;
   previews go to the per-user data folder; the autorouter's temp folder is removed after a run;
