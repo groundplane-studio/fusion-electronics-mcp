@@ -99,6 +99,23 @@ class LibraryTest(unittest.TestCase):
         self.assertIn("LAYER 114 JLC_FOOTPRINT;", s)
         self.assertIn("ATTRIBUTE JLCPCB 'C25744';", s)
 
+    def test_reuse_package(self):
+        import xml.etree.ElementTree as ET
+        from fusion_mcp.library import same_package
+        p = Library(SAMPLE_LIB).get("placeholder-nmos-sot23")
+        pkg = p.data["package"]
+        s = build_script(p, reuse_package=True)
+        addin = load_addin()
+        addin.validate(s)
+        self.assertNotIn(".pac'", s)                       # the package is not drawn again
+        self.assertIn(f"PACKAGE '{pkg['name']}'", s)       # but the device still uses it
+        el = ET.Element("package", name=pkg["name"].upper())
+        for d in pkg["smds"]:
+            ET.SubElement(el, "smd", name=d["name"], x=str(d["x"]), y=str(d["y"]), dx=str(d["dx"]), dy=str(d["dy"]))
+        self.assertTrue(same_package(el, pkg))
+        el.find("smd").set("x", str(float(pkg["smds"][0]["x"]) + 0.5))
+        self.assertFalse(same_package(el, pkg))            # different pads under the same name
+
 
 class FakeBridge:
     """Records commands. Exports return the fixture board; when `mutate` is

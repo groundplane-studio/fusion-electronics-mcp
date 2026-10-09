@@ -63,6 +63,16 @@ take `design=` and refuse when Fusion's active design is another one.
 - Lengths from `list_nets`, `get_net` and `check_length_match` no longer
   count air wires.
 
+### Parts and copper
+- `insert_library_part` reuses a package the library already has when its pads are the same
+  (two ICs on the same JLC SOT-23-6, for example), instead of refusing the second part. A
+  different footprint under an existing package name is still refused.
+- New `delete_copper` tool: deletes chosen vias, trace segments and pours of one net and leaves
+  the rest alone. To redraw a pour that has stopped filling properly, delete it and `add_pour` it
+  again.
+- JLC rule files: the same-signal via clearance no longer exceeds the different-signal one, so
+  Fusion's plausibility prompt no longer blocks DRC.
+
 
 ## 0.2.0 (2026-10-04)
 

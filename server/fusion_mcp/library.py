@@ -83,10 +83,31 @@ class Library:
         return self.parts[part_id]
 
 
-def build_script(part: Part) -> str:
+def same_package(el, pkg: dict, tol: float = 0.02) -> bool:
+    """An exported library <package> element has the same pads as the part's package (names,
+    positions and sizes), so a second device can use it instead of drawing it again."""
+    def key(name, x, y, a, b):
+        return (str(name).upper(), round(float(x) / tol), round(float(y) / tol), round(float(a) / tol), round(float(b) / tol))
+    got = sorted([key(s.get("name"), s.get("x"), s.get("y"), s.get("dx"), s.get("dy")) for s in el.findall("smd")]
+                 + [key(p.get("name"), p.get("x"), p.get("y"), p.get("drill"), p.get("diameter") or 0) for p in el.findall("pad")])
+    want = sorted([key(s["name"], s["x"], s["y"], s["dx"], s["dy"]) for s in pkg.get("smds", [])]
+                  + [key(p["name"], p["x"], p["y"], p["drill"], p.get("diameter", 0)) for p in pkg.get("pads", [])])
+    return got == want
+
+
+def build_script(part: Part, reuse_package: bool = False) -> str:
+    """reuse_package: the library already has this package (same pads), so only the symbol and
+    device are drawn and the device uses the existing package."""
     d = part.data
     pkg, sym = d["package"], d["symbol"]
-    L = ["GRID MM;", f"EDIT {q(pkg['name'] + '.pac')};", "LAYER 1;"]
+    L = ["GRID MM;"]
+    if not reuse_package:
+        L += _package_commands(pkg)
+    return _symbol_and_device(L, d, sym, pkg)
+
+
+def _package_commands(pkg: dict) -> list:
+    L = [f"EDIT {q(pkg['name'] + '.pac')};", "LAYER 1;"]
     for s in pkg.get("smds", []):
         L.append(f"SMD {n(s['dx'])} {n(s['dy'])} -{int(s.get('roundness', 0))} R{n(s.get('rot', 0))} "
                  f"{q(s['name'])} ({n(s['x'])} {n(s['y'])});")
@@ -118,7 +139,10 @@ def build_script(part: Part) -> str:
           "LAYER 27;", f"TEXT '>VALUE' R0 (-1 {n(min(ys) - 1.8)})"+";"]
     if pkg.get("jlc_native"):
         L += [f"LAYER {MARKER_LAYER} JLC_FOOTPRINT;", "CHANGE SIZE 0.6;", "TEXT 'JLC' R0 (0 0);"]
+    return L
 
+
+def _symbol_and_device(L: list, d: dict, sym: dict, pkg: dict) -> str:
     from . import std_symbols as SS
     # two-pin passives always get the library's standard symbol (std_symbols), whatever the
     # source drew; "style": false in the part keeps the part's own symbol

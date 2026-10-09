@@ -36,11 +36,16 @@ TWO_LAYER = os.path.join(DATA, "rules", "JLC 2-layer 1.6mm.edru")
 RULES = {
     "msDrill": "0.3mm",          # JLC allows 0.15-0.2 mm but charges more below 0.3 mm; go smaller by hand
     "mdDrill": "0.2mm",          # via hole to via hole 0.2 mm (pad holes want 0.45 mm)
-    "mdSmdSmd": "0.15mm",        # SMD pad to pad, different nets
+    # mdSmd* are SAME-signal clearances (different nets use mdPadPad etc.): each must stay at or
+    # under the smallest different-signal value (0.1 mm), or Fusion's DRC plausibility check stops it
+    "mdSmdSmd": "0.1mm", "mdSmdPad": "0.1mm",
     # PTH annular ring: 2-layer minimum 0.18 mm, and 0.18 + 0.1 pad-to-track meets PTH-to-track 0.28 mm
     "rlMinPadTop": "0.18mm", "rlMinPadInner": "0.18mm", "rlMinPadBottom": "0.18mm",
     # via ring 0.1 mm + 0.1 mm wire-to-via meets via hole to track 0.2 mm (0.3 mm drill -> 0.5 mm via)
     "rlMinViaOuter": "0.1mm", "rlMinViaInner": "0.1mm",
+    # same-signal via spacing may not exceed the different-signal one (mdViaVia 0.12 mm), or
+    # Fusion's DRC stops on a plausibility warning before it runs
+    "mdViaViaSameLayer": "0.12mm",
 }
 
 
@@ -98,6 +103,20 @@ def fetch() -> None:
 
 def _layer(kind: str, extra: str, inner: str) -> str:
     return f' <layerdef type="{kind}" id="{{{uuid.uuid4()}}}"{extra}>\n {inner}\n</layerdef>\n'
+
+
+def keep_ids(text: str, path: str) -> str:
+    """Reuse the layer ids already in `path` (same layers, same order), so rebuilding the files
+    only changes what really changed instead of every id."""
+    if not os.path.exists(path):
+        return text
+    with open(path, encoding="utf-8") as f:
+        old = re.findall(r'<layerdef [^>]*id="([^"]*)"', f.read())
+    new = re.findall(r'<layerdef [^>]*id="([^"]*)"', text)
+    if len(old) != len(new):
+        return text
+    it = iter(old)
+    return re.sub(r'(<layerdef [^>]*id=")[^"]*(")', lambda m: m.group(1) + next(it) + m.group(2), text)
 
 
 def stackup_xml(name: str, layers: list[dict], retrieved: str) -> str | None:
@@ -168,7 +187,9 @@ def build() -> None:
             continue
         n = sum(1 for layer in layers if layer["kind"] == "copper")
         base = f"{name} {n}-layer"
-        with open(os.path.join(DATA, "stackups", base + ".estackup"), "w", encoding="utf-8") as f:
+        path = os.path.join(DATA, "stackups", base + ".estackup")
+        xml = keep_ids(xml, path)                 # the rule file carries the same stackup and ids
+        with open(path, "w", encoding="utf-8") as f:
             f.write(head + xml + "\n</eagle>\n")
         r = re.sub(r"<layerstackup .*?</layerstackup>", lambda _: xml, rules, count=1, flags=re.S)
         r = re.sub(r'<designrules name="[^"]*"', f'<designrules name="{name} (Groundplane rules)"', r, count=1)

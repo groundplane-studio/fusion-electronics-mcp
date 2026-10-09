@@ -31,7 +31,7 @@ from . import staleness
 from . import dialogs
 from .bridge import BridgeOpError, BridgeUnavailable
 from .fusion_lock import FusionBusy
-from .library import Library, build_script
+from .library import Library, build_script, same_package
 from .session import Session, Snapshot, WriteFailed
 
 mcp = MCPServer(
@@ -2591,6 +2591,93 @@ def _delete_segment(sb: dict, wl: int) -> None:
 
 
 @tool(CHANGE)
+def delete_copper(net: str, vias: list[list[float]] | None = None,
+                  segments: list[list[float]] | None = None,
+                  pours: list[list[float]] | None = None) -> dict:
+    """Delete specific copper of one net without touching the rest: vias at [x, y], trace
+    segments given by their end points [x1, y1, x2, y2] (mm, either order), and pours (polygons)
+    given by any point [x, y] on their outline. Pours of the net that are not listed stay
+    filled, which rip_up cannot do for a pour net (e.g. clearing GND vias under a part that is
+    about to rotate, or moving part of a 12 V trunk). To redraw a pour that no longer fills
+    properly, delete it here and add_pour it again. Each deletion is verified: exactly the
+    listed copper goes, parts stay put."""
+    snap = _snap(schematic=False)
+    for px, py in pours or []:
+        root = D.read_xml(snap.board_xml)
+        sig_el = next((s for s in root.iter("signal") if s.get("name") == net), None)
+        hit, best = None, 0.15
+        for pg in (sig_el.findall("polygon") if sig_el is not None else []):
+            pts = [(float(v.get("x")), float(v.get("y"))) for v in pg.findall("vertex")]
+            for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1]):
+                vx, vy = x2 - x1, y2 - y1
+                L = vx * vx + vy * vy
+                t = 0 if L == 0 else max(0.0, min(1.0, ((px - x1) * vx + (py - y1) * vy) / L))
+                # the export holds the outline inset by half its width, so click on that line
+                # (a plain DELETE on a polygon edge only removes a corner, Shift deletes the polygon)
+                d = math.hypot(px - x1 - t * vx, py - y1 - t * vy)
+                if d < best:
+                    hit, best, click = int(pg.get("layer")), d, (x1 + t * vx, y1 + t * vy)
+        if hit is None:
+            raise ValueError(f"no {net} pour has an outline through ({px}, {py})")
+        wl = _write_layer("bottom") if hit in (16, 304) else hit
+        pre, post = _only_layers([wl])
+        count = lambda sn: sn.board().signals[net].polygons
+        copper = lambda sn: (len(sn.board().signals[net].wires), len(sn.board().signals[net].vias))
+
+        def verify_pour(before, after):
+            same_parts = [(e.name, e.x, e.y) for e in before.fab().elements] == \
+                         [(e.name, e.x, e.y) for e in after.fab().elements]
+            ok = count(after) == count(before) - 1 and copper(after) == copper(before) and same_parts
+            return ok, f"{net} pours {count(before)} -> {count(after)}"
+        try:
+            session.verified_write("board", f"{pre} DELETE (S {C.pt(*click)[1:]}; {post}", verify_pour, schematic=False)
+        finally:
+            _ensure_view()
+        snap = _snap(schematic=False)
+    sig = snap.board().signals.get(net)
+    if sig is None:
+        raise KeyError(f"no net {net!r}")
+    near = lambda a, b: abs(a - b) < 0.01
+    done = {"vias": [], "segments": [], "pours": [list(p) for p in pours or []]}
+    for s in segments or []:
+        x1, y1, x2, y2 = s
+        w = next((w for w in sig.wires if w.layer != 19 and (
+            (near(w.x1, x1) and near(w.y1, y1) and near(w.x2, x2) and near(w.y2, y2)) or
+            (near(w.x1, x2) and near(w.y1, y2) and near(w.x2, x1) and near(w.y2, y1)))), None)
+        if w is None:
+            raise ValueError(f"no {net} segment from ({x1}, {y1}) to ({x2}, {y2})")
+        wl = _write_layer("bottom") if w.layer == 16 else w.layer
+        # click near the end fewer other wires and vias meet, so the pick cannot land on a neighbour
+        meets = lambda x, y: sum(1 for o in sig.wires if o is not w and o.layer != 19 and (
+            (near(o.x1, x) and near(o.y1, y)) or (near(o.x2, x) and near(o.y2, y)))) +             sum(1 for v in sig.vias if near(v.x, x) and near(v.y, y))
+        loose = (w.x1, w.y1) if meets(w.x1, w.y1) < meets(w.x2, w.y2) else (w.x2, w.y2)
+        _delete_segment({"net": net, "x1": w.x1, "y1": w.y1, "x2": w.x2, "y2": w.y2,
+                         "dangling": loose}, wl)
+        sig = _snap(schematic=False).board().signals[net]
+        done["segments"].append([w.x1, w.y1, w.x2, w.y2])
+    if vias:
+        have = {(round(v.x, 3), round(v.y, 3)) for v in sig.vias}
+        want = {(round(x, 3), round(y, 3)) for x, y in vias}
+        if want - have:
+            raise ValueError(f"no {net} via at {sorted(want - have)}")
+        pre, post = _only_layers([18])
+        cmd = pre + " " + " ".join(f"DELETE {C.pt(x, y)};" for x, y in want) + " " + post
+        key = lambda sn: {(round(v.x, 3), round(v.y, 3)) for v in sn.board().signals[net].vias}
+
+        def verify(before, after):
+            gone = key(before) - key(after)
+            same_parts = [(e.name, e.x, e.y) for e in before.fab().elements] == \
+                         [(e.name, e.x, e.y) for e in after.fab().elements]
+            return gone == want and same_parts, f"removed {len(gone)} of {len(want)} {net} vias"
+        try:
+            session.verified_write("board", cmd, verify, schematic=False)
+        finally:
+            _ensure_view()
+        done["vias"] = sorted(want)
+    return {"ok": True, "net": net, "deleted": done}
+
+
+@tool(CHANGE)
 def clean_vias(net: str = "GND") -> dict:
     """Delete a net's vias that now violate clearance to a pad (any net) or to another net's copper,
     e.g. stitching vias left under a part that moved. Run stitch_vias again afterwards to refill."""
@@ -3424,11 +3511,17 @@ def insert_library_part(part_id: str) -> dict:
     session.activate("library")
     from fusion_offline import design as D0
     existing = D0.read_xml(session.export("library"))
-    names = {(e.get("name") or "").upper() for e in existing.iter() if e.tag in ("deviceset", "package")}
-    if part.data["deviceset"].upper() in names or part.data["package"]["name"].upper() in names:
-        raise ValueError(f"{part.data['deviceset']} (or its package) is already in this library; "
-                         "re-running the build script would duplicate pads")
-    session.run_script(build_script(part), "library")
+    up0 = lambda v: (v or "").upper()
+    if any(up0(e.get("name")) == up0(part.data["deviceset"]) for e in existing.iter("deviceset")):
+        raise ValueError(f"{part.data['deviceset']} is already in this library; re-running the build "
+                         "script would duplicate it")
+    # a package another device already drew (e.g. two ICs on the same JLC SOT-23-6) is reused
+    # when its pads are the same; a different footprint under the same name is refused
+    have = next((e for e in existing.iter("package") if up0(e.get("name")) == up0(part.data["package"]["name"])), None)
+    if have is not None and not same_package(have, part.data["package"]):
+        raise ValueError(f"package {part.data['package']['name']} is already in this library with different "
+                         "pads; rename this part's package")
+    session.run_script(build_script(part, reuse_package=have is not None), "library")
     from fusion_offline import design as D
     root = D.read_xml(session.export("library"))
     up = lambda v: (v or "").upper()
