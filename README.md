@@ -42,6 +42,15 @@ GND stitched, silkscreen and 3D models checked.*
   the part they serve by rule (`place_clusters`: pull-ups and series parts on
   their pin's escape line, decaps first, bridges along the package edge, LED
   and FET chains following the part they hang off), previewed before moving.
+  Check placement (courtyards, pad gaps, silkscreen, tidiness), move parts in
+  batches as one undo step, line series parts up on their pads
+  (`place_inline`) and tidy to a grid without touching critical parts.
+- **Net classes and rules**: list, create (as a rule file you load) and assign
+  net classes; teardrop and pair rules; JLCPCB limits; DRC after every write
+  reporting only new errors.
+- **Length and current**: length groups through series parts with cited
+  typical tolerances, coupled detours for matching, trace widths from a net's
+  current and the weakest part's rating.
 - **Routing**, in the order a person routes a board: pours (with priority
   ranks), a GND via beside every ground pad (`ground_vias`), all the short
   pin-to-pin hops at once (`route_close`), buses laid as ordered parallel lanes
@@ -73,7 +82,7 @@ GND stitched, silkscreen and 3D models checked.*
   against the design (every layer, the outline, every drilled hole, paste and
   mask on every SMD pad).
 
-`fusion-electronics-mcp tools` lists all 77 tools.
+`fusion-electronics-mcp tools` lists all 100 tools.
 
 ## Requirements
 
@@ -240,6 +249,9 @@ same correction on the part in your library (`JLC-ROTATION`, `JLC-X-OFFSET`,
 | `FUSION_MCP_GROUND_SYMBOL` | none | ground symbol for block schematics, `DEVICE@LIBRARY` |
 | `FUSION_MCP_POWER_SYMBOL` | none | power symbol for block schematics (its value is set to each rail's name), `DEVICE@LIBRARY` |
 | `FUSION_MCP_KEEP_FOCUS` | `1` | hand keyboard focus back when Fusion takes it |
+| `FUSION_MCP_LOCK_WAIT_S` | `30` | how long a call waits while another Claude session is using Fusion (only one at a time) |
+| `FUSION_MCP_DRC_AFTER_WRITES` | `1` | run DRC before and after every write and report the new errors (`0` to turn off) |
+| `FUSION_MCP_UNDO_ON_NEW_DRC` | `0` | `1` also undoes a write that adds copper DRC errors |
 | `FUSION_MCP_EASYEDA_CACHE` | per-user data folder | EasyEDA footprint cache |
 | `FUSION_MCP_EASYEDA_INTERVAL_S` | `15` | minimum seconds between EasyEDA requests |
 

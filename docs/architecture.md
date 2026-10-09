@@ -85,13 +85,33 @@ Layers and rules
   from the design rules; via copper likewise.
 - Design rules (V2) live in the design; the working copy refreshes only after a
   save. The API cannot write them: people load `.edru` files in the DRC dialog.
-- Net classes created with `CLASS n 'name' width [n:clearance]` produce rules
-  that Fusion's DRC applied to every net, labelled with one class. Keep class
-  rules minimal.
+- Net classes (2705.1.25): a class lives in the board's `<classes>` (number,
+  name, width, drill, class-to-class clearance) and in the V2 rules as a
+  "Minimum Copper Width", "Minimum Drill Size" and "Copper Clearance" rule with
+  `onescope="classes=N"` (clearance also `otherscope="classes=N"`), ahead of
+  the built-in rules. The legacy width fills in only after a save. The
+  `CLASS` command made rules that hit all copper and survived UNDO, so
+  classes are made by loading a generated `.edru` (or the Net Classes dialog);
+  nets are put in a class with `CHANGE CLASS name (x y)` on a schematic wire
+  (`CHANGE CLASS name net` fails). A class width rule also covers the class's
+  pads.
+- Loading an `.edru` replaces all rules; the working copy the server reads
+  them from is the last saved state, so rule files are built only from a
+  saved design.
 - `SET POLYGON_RATSNEST ON` is needed for pours to fill; `CHANGE THERMALWIDTH`
   sets relief spokes (Fusion's default 0.1524 mm is thin).
 - Never wrap AUTO / DRC / ERC / RATSNEST / SET in a design change: wrapping AUTO
   broke undo for the whole session.
+
+Sessions and safety
+- Each Claude session runs its own server; an OS file lock in the per-user data
+  folder lets one at a time talk to Fusion, held for a write's whole export,
+  write, read-back and undo.
+- Writes take `design=` and check Fusion's active design just before writing:
+  another session (or the person) can switch designs between calls, and part
+  names like R1 exist on most boards.
+- Command numbers are written to 0.1 um (`:g` kept 6 significant digits, so
+  coordinates over 100 mm were rounded).
 
 Autorouter (AUTO)
 - Opens a "Routing Variants" dialog and starts variants at once. End Job applies

@@ -385,3 +385,138 @@ class SplitSettingsTest(unittest.TestCase):
         self.assertEqual(pre, "SET WIRE_BEND 2;")
         self.assertEqual(post, "SET WIRE_BEND 1;")
         self.assertNotIn("SET", body)
+
+
+def _fusion_writer_class():
+    """A fresh copy of the stdout wrapper Autodesk's MCP script runner installs
+    before every script (same shape: write/flush, and __getattr__ forwarding to
+    self._original). Each script run defines a new class object."""
+    class _NsSanitizedWriter:
+        def __init__(self, original):
+            self._original = original
+
+        def write(self, s):
+            return self._original.write(s)
+
+        def flush(self):
+            return self._original.flush()
+
+        def __getattr__(self, name):
+            return getattr(self._original, name)
+    return _NsSanitizedWriter
+
+
+class FusionStdoutRecursionTest(unittest.TestCase):
+    def _repair(self):
+        from fusion_mcp import builtin as B
+        ns: dict = {}
+        exec(B.STREAM_REPAIR.split("import sys as _femcp_sys")[0], ns)
+        return ns["_femcp_repair_streams"]
+
+    def _leaked(self, runs):
+        import io
+        real = io.StringIO()
+        out = real
+        for _ in range(runs):                      # one wrapper per run that was never unwrapped
+            out = _fusion_writer_class()(out)
+        return real, types.SimpleNamespace(stdout=out, stderr=out, __stdout__=real, __stderr__=real)
+
+    def test_leaked_wrappers_recurse_until_repaired(self):
+        real, fake_sys = self._leaked(5000)
+        with self.assertRaises(RecursionError):    # what Fusion reported: line 25, in __getattr__
+            fake_sys.stdout.encoding
+        self._repair()(fake_sys)
+        self.assertIs(vars(fake_sys.stdout)["_original"], real)
+        fake_sys.stdout.write("@@FEMCP@@{}")
+        self.assertEqual(fake_sys.stdout.getvalue(), "@@FEMCP@@{}")   # forwarded, no recursion
+        self.assertEqual(fake_sys.stdout.encoding, real.encoding)
+
+    def test_wrapper_without_original_raises_or_is_repaired(self):
+        cls = _fusion_writer_class()
+        orphan = object.__new__(cls)               # e.g. copied/unpickled: __init__ never ran
+        with self.assertRaises(RecursionError):    # __getattr__('_original') calls itself forever
+            orphan.encoding
+        import io
+        real = io.StringIO()
+        fake_sys = types.SimpleNamespace(stdout=orphan, stderr=io.StringIO(), __stdout__=real, __stderr__=None)
+        self._repair()(fake_sys)
+        orphan.write("ok")
+        self.assertEqual(real.getvalue(), "ok")
+
+    def test_every_script_repairs_streams_before_anything_else(self):
+        from fusion_mcp import builtin as B
+        for op, ro in (("export", True), ("run", False)):
+            s = B.build_script(op, {}, read_only=ro)
+            self.assertTrue(s.startswith(B.STREAM_REPAIR))
+            compile(s, op, "exec")
+
+
+class BuiltinClientRecoveryTest(unittest.TestCase):
+    def _client(self, post):
+        from fusion_mcp import builtin as B
+        c = B.BuiltinClient("http://127.0.0.1:1/mcp")
+        c._initialize = lambda timeout=5.0: setattr(c, "session", "s%d" % c._id)
+        c._post = post
+        return c
+
+    @staticmethod
+    def _ok(payload):
+        text = json.dumps({"success": True, "message": "@@FEMCP@@" + json.dumps(payload)})
+        return None, {"result": {"content": [{"text": text}]}}
+
+    def test_calls_never_overlap(self):
+        import threading
+        import time
+        live, peak = [0], [0]
+
+        def post(body, timeout):
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+            time.sleep(0.05)
+            live[0] -= 1
+            return self._ok({"ok": True, "result": 1})
+        c = self._client(post)
+        ts = [threading.Thread(target=c.call, args=("context", {}, 5)) for _ in range(6)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(peak[0], 1)
+
+    def test_lost_session_is_reinitialised_and_retried(self):
+        calls = []
+
+        def post(body, timeout):
+            calls.append(body)
+            if len(calls) == 1:
+                return None, {"jsonrpc": "2.0", "error": {"code": -32600,
+                              "message": "Session not initialized. Call 'initialize' first."}}
+            return self._ok({"ok": True, "result": "fine"})
+        c = self._client(post)
+        self.assertEqual(c.call("context", {}, 5), {"ok": True, "result": "fine"})
+        self.assertEqual(len(calls), 2)
+
+    def test_failure_resets_session_for_next_call(self):
+        from fusion_mcp import builtin as B
+        state = {"fail": True}
+
+        def post(body, timeout):
+            if state["fail"]:
+                raise TimeoutError("timed out")
+            return self._ok({"ok": True, "result": 2})
+        c = self._client(post)
+        with self.assertRaises(OSError):
+            c.call("context", {}, 5)
+        self.assertIsNone(c.session)
+        state["fail"] = False
+        self.assertEqual(c.call("context", {}, 5)["result"], 2)
+
+    def test_recursion_error_is_reported_cleanly(self):
+        from fusion_mcp import builtin as B
+        err = ('Traceback (most recent call last):\n  File "<string>", line 25, in __getattr__\n'
+               'RecursionError: Stack overflow (used 993 kB)')
+        c = self._client(lambda body, timeout: (None, {"result": {"content": [
+            {"text": json.dumps({"success": False, "error": err})}]}}))
+        with self.assertRaises(B.BuiltinError) as cm:
+            c.call("context", {}, 5)
+        self.assertEqual(cm.exception.code, "fusion_stdout_corrupt")

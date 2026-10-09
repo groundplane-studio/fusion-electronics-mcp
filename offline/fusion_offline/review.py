@@ -36,6 +36,27 @@ def _has_supply(s: SchematicDesign, seg) -> bool:
     return False
 
 
+def overbar(name: str) -> dict:
+    """Fusion's overbar markup: each '!' turns the bar on or off ('PI_LED_!PWR' bars PWR).
+    Returns {plain, readable ('PI_LED_~{PWR}'), suspect: why the markup looks wrong, or None}.
+    A bar that stops before the end of the name usually belongs on the signal name at the end
+    ('PI_!LED!_ACTIVITY' bars LED; meant 'PI_LED_!ACTIVITY'), and an empty bar ('!!') draws
+    nothing."""
+    if "!" not in name:
+        return {"plain": name, "readable": name, "suspect": None}
+    parts = name.split("!")
+    plain = "".join(parts)
+    readable = "".join(f"~{{{p}}}" if i % 2 and p else p for i, p in enumerate(parts))
+    suspect = None
+    barred = [p for i, p in enumerate(parts) if i % 2]
+    if any(p == "" for i, p in enumerate(parts) if i % 2 and i < len(parts) - 1):
+        suspect = "an empty overbar ('!!') draws nothing"
+    elif len(parts) % 2 == 1 and parts[-1].strip("_- "):
+        suspect = (f"the overbar covers {', '.join(repr(b) for b in barred)} and stops before "
+                   f"{parts[-1]!r}: an active-low bar usually runs to the end of the name")
+    return {"plain": plain, "readable": readable, "suspect": suspect}
+
+
 def _visible_groups(segments):
     """Segments on the same sheet that end on a common pin are visibly joined
     through it; group those, so only truly separate pieces are counted."""
@@ -132,6 +153,30 @@ def review(s: SchematicDesign, jlc_attr: str = "JLCPCB") -> list[dict]:
                 add("warning", "unlabeled_net_segment",
                     f"net {n.name} is drawn as {len(groups)} separate pieces; {len(bare)} have no net label "
                     f"(sheet {', '.join(map(str, sheets))}), so the connection is not visible", [n.name])
+
+    for n in s.nets.values():
+        # supply symbols name their net: a supply on a differently named net was overwritten
+        # (Fusion ERC 102 "SUPPLY pin GND overwritten with N$25"; review missed it, 2026-10-04)
+        sup = []
+        for r in n.pins:
+            part = s.parts.get(r.part)
+            pin = s.pin(r.part, r.pin)
+            if part and not part.package and pin and pin.direction == "sup":
+                sup.append((r.part, r.pin, part.value or ""))
+        for ref, pin_name, value in sup:
+            names = {pin_name.split("@")[0].upper(), value.strip().upper()} - {""}
+            if n.name.upper() not in names:
+                add("error", "supply_on_other_net",
+                    f"supply symbol {ref} ({' / '.join(sorted({pin_name.split('@')[0], value} - {''}))}) sits on net "
+                    f"{n.name}: the supply name was overwritten. Join it to its rail or rename the net",
+                    [ref, n.name])
+        if sup and len(n.pins) == len(sup):
+            add("warning", "supply_alone",
+                f"net {n.name} connects only supply symbol(s) {', '.join(r for r, _, _ in sup)}: the wire "
+                "probably misses the pin or the net it was meant for", [r for r, _, _ in sup])
+        ob = overbar(n.name)
+        if ob["suspect"]:
+            add("warning", "overbar_markup", f"net {n.name} (reads {ob['readable']}): {ob['suspect']}", [n.name])
 
     no_code, no_value = [], []
     for part in s.parts.values():

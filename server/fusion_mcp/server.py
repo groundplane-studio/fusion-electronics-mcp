@@ -27,8 +27,10 @@ from fusion_offline import bompnp, design as D, review as review_rules, si
 from . import PROJECT_URL, __version__
 
 from . import commands as C
+from . import staleness
 from . import dialogs
 from .bridge import BridgeOpError, BridgeUnavailable
+from .fusion_lock import FusionBusy
 from .library import Library, build_script
 from .session import Session, Snapshot, WriteFailed
 
@@ -57,14 +59,16 @@ def tool(annotations: ToolAnnotations):
     def deco(fn):
         @functools.wraps(fn)
         def wrapped(*a, **kw):
+            stale = staleness.note()
+            tail = f" (Note: {stale})" if stale else ""
             try:
-                return fn(*a, **kw)
-            except BridgeUnavailable as ex:
-                raise ToolError(str(ex)) from None
+                return staleness.attach(fn(*a, **kw), stale)
+            except (BridgeUnavailable, FusionBusy) as ex:
+                raise ToolError(str(ex) + tail) from None
             except BridgeOpError as ex:
-                raise ToolError(f"Fusion refused the operation ({ex.code}): {ex.message}") from None
+                raise ToolError(f"Fusion refused the operation ({ex.code}): {ex.message}{tail}") from None
             except (WriteFailed, C.InvalidInput, KeyError, ValueError) as ex:
-                raise ToolError(str(ex).strip("'\"")) from None
+                raise ToolError(str(ex).strip("'\"") + tail) from None
         return mcp.tool(annotations=annotations)(wrapped)
     return deco
 
@@ -83,8 +87,13 @@ def _layer_name(board, num: int) -> str:
 
 @tool(READ)
 def get_context() -> dict:
-    """Which Electronics documents are open in Fusion and which editor is active."""
-    return session.context()
+    """Which Electronics documents are open in Fusion and which editor is active, and this server's
+    version (with a warning when its code is older than what is on disk)."""
+    import time as _time
+    out = dict(session.context())
+    out["server"] = {"version": __version__, "code_loaded": _time.strftime("%Y-%m-%d %H:%M",
+                                                                         _time.localtime(staleness.STARTED))}
+    return out
 
 
 @tool(READ)
@@ -96,15 +105,22 @@ def list_designs(folder: str | None = None) -> dict:
 
 
 @tool(ADDITIVE)
-def open_design(name: str, folder: str | None = None) -> dict:
-    """Open a design (schematic + board) from the active project and make it current."""
-    return session.bridge.call("open_design", {"name": name, "folder": folder}, timeout=180)
+def open_design(name: str, folder: str | None = None, allow_unsaved: bool = False) -> dict:
+    """Make a design (schematic + board) current. If any of its documents is already open,
+    Fusion just switches to it (already_open=true). Otherwise it is opened from the active
+    project, which is refused while an open design has unsaved changes (that once froze
+    Fusion): save first, or pass allow_unsaved=true to open it anyway. Switching designs
+    affects every Claude session using Fusion."""
+    return session.bridge.call("open_design", {"name": name, "folder": folder, "allow_unsaved": allow_unsaved},
+                               timeout=180)
 
 
 @tool(ADDITIVE)
-def open_library(name: str, folder: str | None = None) -> dict:
-    """Open a Fusion library (.flbr) from the active project in the library editor."""
-    return session.bridge.call("open_design", {"name": name, "folder": folder, "kind": "library"}, timeout=180)
+def open_library(name: str, folder: str | None = None, allow_unsaved: bool = False) -> dict:
+    """Open a Fusion library (.flbr) from the active project in the library editor (or switch to
+    it if open). allow_unsaved as in open_design."""
+    return session.bridge.call("open_design", {"name": name, "folder": folder, "kind": "library",
+                                               "allow_unsaved": allow_unsaved}, timeout=180)
 
 
 @tool(ADDITIVE)
@@ -122,17 +138,21 @@ def close_design(name: str, discard_changes: bool = False) -> dict:
 
 @tool(READ)
 def get_board_summary() -> dict:
-    """Board size, copper layers, part and net counts, net classes and design-rule highlights."""
+    """Board size, copper layers, part and net counts, net classes (width, drill and clearance as
+    DRC applies them: a class's design rule first, else its legacy value) and design-rule
+    highlights."""
+    from fusion_offline import net_classes as NC
     s = _snap(schematic=False)
     fab, b = s.fab(), s.board()
+    xml, _ = _v2_rules()
+    eff = NC.effective(D.read_xml(s.board_xml), xml)
     return {
         "size_mm": fab.size_mm, "outline_bbox_mm": fab.outline,
         "copper_layers": [{"number": n, "name": _layer_name(b, n)} for n in b.copper_layers],
         "parts": len(fab.elements), "nets": len(b.signals),
         "routed_nets": sum(1 for x in b.signals.values() if x.wires),
         "vias": sum(len(x.vias) for x in b.signals.values()),
-        "net_classes": [{"number": c.number, "name": c.name, "width_mm": c.width, "drill_mm": c.drill}
-                        for c in b.classes.values()],
+        "net_classes": [{"name": name, **v} for name, v in eff.items()],
         "rules": {k: b.rules.get(k) for k in ("mdWireWire", "msWidth", "msDrill", "rvViaOuter", "layerSetup")},
     }
 
@@ -178,7 +198,9 @@ def get_part(ref: str) -> dict:
 
 @tool(READ)
 def list_nets(filter: str = "", limit: int = 1000) -> list[dict]:
-    """Nets (merged across schematic sheets) with pin counts and routed length on the board."""
+    """Nets (merged across schematic sheets) with pin counts and routed length on the board (copper
+    only). Names with overbar markup ('!') also get a readable form, e.g. PI_LED_~{PWR}."""
+    from fusion_offline import review as RV
     s = _snap()
     b = s.board()
     sch = s.schematic() if s.sch_xml else None
@@ -188,20 +210,31 @@ def list_nets(filter: str = "", limit: int = 1000) -> list[dict]:
         if filter and filter.lower() not in name.lower():
             continue
         sig = b.signals.get(name)
-        rows.append({"name": name, "class": sig.net_class if sig else (sch.nets[name].net_class if sch else None),
-                     "schematic_pins": len(sch.nets[name].pins) if sch and name in sch.nets else 0,
-                     "board_contacts": len(sig.contacts) if sig else 0,
-                     "routed_mm": round(sig.length, 3) if sig else 0.0, "vias": len(sig.vias) if sig else 0})
+        row = {"name": name, "class": sig.net_class if sig else (sch.nets[name].net_class if sch else None),
+               "schematic_pins": len(sch.nets[name].pins) if sch and name in sch.nets else 0,
+               "board_contacts": len(sig.contacts) if sig else 0,
+               "routed_mm": round(sum(w.length for w in sig.wires if w.layer != 19), 3) if sig else 0.0,
+               "vias": len(sig.vias) if sig else 0}
+        if "!" in name:
+            ob = RV.overbar(name)
+            row["readable"] = ob["readable"]
+            if ob["suspect"]:
+                row["markup_warning"] = ob["suspect"]
+        rows.append(row)
     return rows[:limit]
 
 
 @tool(READ)
 def get_net(name: str) -> dict:
-    """One net: its schematic pins (with direction) and its board routing by layer."""
+    """One net: its schematic pins (with direction) and its board routing by layer (length_mm is
+    routed copper; unrouted_mm the air wires). Overbar markup gets a readable form."""
+    from fusion_offline import review as RV
     s = _snap()
     b = s.board()
     sch = s.schematic() if s.sch_xml else None
     out: dict[str, Any] = {"name": name}
+    if "!" in name:
+        out["overbar"] = RV.overbar(name)
     if sch and name in sch.nets:
         n = sch.nets[name]
         out["schematic"] = {"class": n.net_class, "sheets": sorted(set(n.sheets)),
@@ -211,12 +244,13 @@ def get_net(name: str) -> dict:
     if name in b.signals:
         g = b.signals[name]
         out["board"] = {"class": g.net_class, "contacts": [f"{e}.{p}" for e, p in g.contacts],
-                        "length_mm": round(g.length, 3),
+                        "length_mm": round(sum(w.length for w in g.wires if w.layer != 19), 3),
+                        "unrouted_mm": round(sum(w.length for w in g.wires if w.layer == 19), 3),
                         "length_by_layer_mm": {_layer_name(b, k): round(v, 3) for k, v in g.length_by_layer().items()},
                         "widths_mm": sorted({round(w.width, 4) for w in g.wires}),
                         "vias": [{"x_mm": v.x, "y_mm": v.y, "drill_mm": v.drill, "extent": v.extent} for v in g.vias],
                         "polygons": g.polygons}
-    if len(out) == 1:
+    if "schematic" not in out and "board" not in out:
         raise KeyError(f"no net {name!r}")
     return out
 
@@ -262,9 +296,33 @@ def _design_rules_xml(stackup_file: str | None):
 
 @tool(READ)
 def run_drc() -> dict:
-    """Run Fusion's DRC on the board and return the violations."""
-    session.run("DRC;", "board")
+    """Run Fusion's DRC on the board and return every violation (check_drc summarises them and
+    shows what changed instead)."""
+    session.run("DRC;", "board", check_dialogs=False)
     return session.errors("board")
+
+
+_DRC_LAST: dict[str, list] = {}     # design -> errors of its last check_drc (this server)
+
+
+@tool(READ)
+def check_drc(compare: bool = True, top: int = 5) -> dict:
+    """Run Fusion's DRC and summarise it: errors by type, airwires as a count (no 200-line
+    dump). With compare=true (default) also what changed since the last check_drc on this
+    design: new errors by type with up to `top` locations each, and how many were fixed or are
+    unchanged. Writes report their own new errors (DRC before and after each verified write)."""
+    from fusion_offline import drc as DRC
+    active = session.active_design()
+    errs = session.drc_errors()
+    out = {"design": active, **DRC.summarize(errs)}
+    prev = _DRC_LAST.get(active or "")
+    if compare and prev is not None:
+        out["since_last_check"] = DRC.diff(prev, errs, top)
+    elif compare:
+        out["since_last_check"] = None
+        out["note"] = "first check of this design in this session; the next check_drc shows what changed"
+    _DRC_LAST[active or ""] = errs
+    return out
 
 
 @tool(READ)
@@ -306,11 +364,358 @@ def check_length_match(nets: list[str], tolerance_mm: float) -> dict:
     missing = [n for n in nets if n not in b.signals]
     if missing:
         raise KeyError(f"not on the board: {', '.join(missing)}")
-    lens = {n: round(b.signals[n].length, 3) for n in nets}
+    lens = {n: round(sum(w.length for w in b.signals[n].wires if w.layer != 19), 3) for n in nets}  # copper, not air wires
+    unrouted = [n for n in nets if any(w.layer == 19 for w in b.signals[n].wires)]
     ref = max(lens.values())
     rows = [{"net": n, "length_mm": L, "short_by_mm": round(ref - L, 3), "ok": ref - L <= tolerance_mm}
             for n, L in lens.items()]
-    return {"reference_mm": ref, "tolerance_mm": tolerance_mm, "all_ok": all(r["ok"] for r in rows), "nets": rows}
+    return {"reference_mm": ref, "tolerance_mm": tolerance_mm, "all_ok": all(r["ok"] for r in rows) and not unrouted,
+            "unrouted": unrouted, "nets": rows}
+
+
+def _tolerance_rows(query: str | None = None) -> list[dict]:
+    import json as _json
+    with open(os.path.join(os.path.dirname(__file__), "data", "length_tolerances.json"), encoding="utf-8") as f:
+        rows = _json.load(f)["rows"]
+    if not query:
+        return rows
+    q = query.casefold()
+    return [r for r in rows if q in r["interface"].casefold()]
+
+
+@tool(READ)
+def length_tolerances(interface: str | None = None) -> dict:
+    """Typical length-matching tolerances per interface (Ethernet MDI, RGMII, SGMII, USB 2/3,
+    PCIe, SATA, HDMI, MIPI CSI-2, DDR4, LPDDR4, ...): within a pair and between pairs/lanes, the
+    impedance, notes, and the vendor document, table and URL each value was read from. A field is
+    null where no source could be confirmed. Typical starting points only: the SoC/PHY design
+    guide for your part wins. interface filters by name (e.g. "1000BASE-T", "DDR4")."""
+    import json as _json
+    with open(os.path.join(os.path.dirname(__file__), "data", "length_tolerances.json"), encoding="utf-8") as f:
+        table = _json.load(f)
+    rows = _tolerance_rows(interface)
+    return {"note": table["note"], "checked": table["checked"], "rows": rows}
+
+
+def _groups_of(design: str | None) -> tuple[str, dict]:
+    from . import design_store
+    name = design or session.active_design() or "unnamed"
+    return name, design_store.load(name).get("length_groups", {})
+
+
+@tool(ADDITIVE)
+def set_length_group(name: str, members: list, intra_tol_mm: float | None = None,
+                     inter_tol_mm: float | None = None, target: str | float = "longest",
+                     measure: str = "pair_average", follow_series: bool = True,
+                     preset: str | None = None, design: str | None = None) -> dict:
+    """Create or replace a length-matching group, saved for this design (a file on this machine,
+    not in the Fusion design). members: pairs ["TP0_P", "TP0_N"] and/or single nets. Each member is
+    measured as a path: through two-pin series parts (0 ohm, series R, AC caps) into the next net
+    when follow_series (TP0_P -> R18 -> N$30), with the part's pad-to-pad length. intra_tol_mm: P
+    vs N skew allowed in each pair; inter_tol_mm: each member against the target ("longest" or a
+    length in mm); measure: a pair's length is its "pair_average" or "max". E.g. 1000BASE-T MDI:
+    TP0-TP3, intra 0.1, inter 0.5 (see the typical tolerances table). Check with
+    check_length_groups. preset: an interface from length_tolerances (e.g. "1000BASE-T") fills
+    in whichever tolerance you leave out and the table has a value for (a blank one stays unset:
+    give it yourself). design: defaults to Fusion's active design."""
+    from . import design_store
+    used = None
+    if preset:
+        rows = _tolerance_rows(preset)
+        if len(rows) != 1:
+            raise ValueError(f"preset {preset!r} matches {len(rows)} rows of length_tolerances; be more specific")
+        used = rows[0]
+        if intra_tol_mm is None and used.get("within_pair"):
+            intra_tol_mm = used["within_pair"]["mm"]
+        if inter_tol_mm is None and used.get("between_pairs"):
+            inter_tol_mm = used["between_pairs"]["mm"]
+    if measure not in ("pair_average", "max"):
+        raise ValueError("measure is 'pair_average' or 'max'")
+    if target != "longest":
+        target = float(target)
+    clean = []
+    for m in members:
+        if isinstance(m, (list, tuple)):
+            if len(m) != 2:
+                raise ValueError(f"a pair member is [P, N]: {m!r}")
+            clean.append([str(m[0]), str(m[1])])
+        else:
+            clean.append(str(m))
+    if not clean:
+        raise ValueError("no members")
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    sigs = {s.get("name") for s in root.iterfind("./drawing/board/signals/signal")}
+    missing = [n for m in clean for n in (m if isinstance(m, list) else [m]) if n not in sigs]
+    if missing:
+        raise ValueError(f"not on the board: {', '.join(missing)}")
+    dname, _ = _groups_of(design)
+    data = design_store.load(dname)
+    data.setdefault("length_groups", {})[name] = {
+        "name": name, "members": clean, "intra_tol_mm": intra_tol_mm, "inter_tol_mm": inter_tol_mm,
+        "target": target, "measure": measure, "follow_series": follow_series}
+    where = design_store.save(dname, data)
+    out = {"design": dname, "group": data["length_groups"][name], "saved_to": where}
+    if used:
+        out["preset"] = {"interface": used["interface"], "source": used["source"], "notes": used["notes"]}
+        if inter_tol_mm is None or intra_tol_mm is None:
+            out["preset"]["missing"] = [k for k, v in (("intra_tol_mm", intra_tol_mm), ("inter_tol_mm", inter_tol_mm))
+                                        if v is None]
+    return out
+
+
+@tool(READ)
+def list_length_groups(design: str | None = None) -> dict:
+    """The length groups saved for a design (default: the active one)."""
+    dname, groups = _groups_of(design)
+    return {"design": dname, "groups": groups}
+
+
+@tool(CHANGE)
+def delete_length_group(name: str, design: str | None = None) -> dict:
+    """Remove a saved length group."""
+    from . import design_store
+    dname, groups = _groups_of(design)
+    if name not in groups:
+        raise ValueError(f"no length group {name!r} for {dname!r}; groups: {', '.join(groups) or 'none'}")
+    data = design_store.load(dname)
+    data["length_groups"].pop(name)
+    design_store.save(dname, data)
+    return {"design": dname, "deleted": name, "left": sorted(data["length_groups"])}
+
+
+def _copper(root) -> dict:
+    """Copper per export layer: the V2 stackup's thicknesses when readable, else the design's."""
+    from fusion_offline import current as CU, stackup as ST
+    xml, _ = _v2_rules()
+    st = ST.parse_stackup(xml) if xml else None
+    cu = [l.thickness_mm for l in st.copper] if st and st.copper and all(l.thickness_mm for l in st.copper) else None
+    return CU.copper_by_layer(root, cu)
+
+
+def _currents(design: str | None = None) -> tuple[str, dict]:
+    from . import design_store
+    name = design or session.active_design() or "unnamed"
+    return name, design_store.load(name).get("net_currents", {})
+
+
+@tool(ADDITIVE)
+def set_net_current(currents: dict[str, float], delta_t_c: float = 10.0, design: str | None = None) -> dict:
+    """Record the current each net carries (A), and the temperature rise allowed (degC), for this
+    design (a file on this machine, next to its length groups). size_for_current and
+    check_current use them, and route_trace / route_net size the trace from them when no width
+    is given. A current of 0 removes the net."""
+    from . import design_store
+    dname, _ = _currents(design)
+    data = design_store.load(dname)
+    store = data.setdefault("net_currents", {})
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    sigs = {sg.get("name") for sg in root.iterfind("./drawing/board/signals/signal")}
+    missing = [n for n in currents if n not in sigs]
+    if missing:
+        raise ValueError(f"not on the board: {', '.join(missing)}")
+    for net, amps in currents.items():
+        if float(amps) <= 0:
+            store.pop(net, None)
+        else:
+            store[net] = {"a": float(amps), "delta_t_c": float(delta_t_c)}
+    design_store.save(dname, data)
+    return {"design": dname, "net_currents": store}
+
+
+@tool(READ)
+def current_ratings(interface: str | None = None) -> dict:
+    """Reference currents interfaces may carry (PoE Types 1-4 per pair set, USB 2.0/3.x default,
+    USB Type-C 1.5 A / 3 A), each with the document it was read from. The parts on a path can
+    allow less: see set_part_rating. interface filters by name (e.g. "PoE")."""
+    import json as _json
+    with open(os.path.join(os.path.dirname(__file__), "data", "current_ratings.json"), encoding="utf-8") as f:
+        table = _json.load(f)
+    if interface:
+        table["rows"] = [r for r in table["rows"] if interface.casefold() in r["interface"].casefold()]
+    return table
+
+
+@tool(ADDITIVE)
+def set_part_rating(part_number: str, current_a: float, source: str, note: str | None = None) -> dict:
+    """Record a part's current rating from its datasheet (part number or value as on the board's
+    parts, the rating in A, and the datasheet link or document), kept for all designs.
+    size_for_current and check_current then cap a net's current at the weakest rated part on it:
+    e.g. PoE magnetics rated 350 mA on a PoE input that the standard allows 960 mA."""
+    from . import part_ratings
+    return {"saved": part_ratings.set_rating(part_number, current_a, source, note), "file": part_ratings.path()}
+
+
+@tool(READ)
+def list_part_ratings() -> dict:
+    """The part current ratings recorded with set_part_rating."""
+    from . import part_ratings
+    return {"ratings": part_ratings.load(), "file": part_ratings.path()}
+
+
+@tool(READ)
+def size_for_current(nets: list[str] | None = None, current_a: float | None = None,
+                     delta_t_c: float | None = None) -> dict:
+    """Trace width each net needs for its current on every copper layer (IPC-2221, conservative:
+    I = k dT^0.44 A^0.725, k 0.048 outer / 0.024 inner), from each layer's real copper thickness
+    (the board's stackup; 0.5 oz inner layers need several times the outer width). Uses the
+    currents saved with set_net_current, or current_a for the nets given. Suggests a current-tier
+    net class (e.g. pwr_1A with the outer width) to create with set_net_class and assign with
+    assign_net_class, so DRC flags narrower traces."""
+    from fusion_offline import current as CU
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    copper = _copper(root)
+    _, saved = _currents()
+    if current_a is not None:
+        if not nets:
+            raise ValueError("give the nets for current_a")
+        want = {n: {"a": current_a, "delta_t_c": delta_t_c or 10.0} for n in nets}
+    else:
+        want = {n: v for n, v in saved.items() if not nets or n in nets}
+        if delta_t_c:
+            want = {n: {**v, "delta_t_c": delta_t_c} for n, v in want.items()}
+    if not want:
+        return {"nets": {}, "note": "no currents saved for these nets: set_net_current, or pass current_a"}
+    from . import part_ratings
+    from fusion_offline import net_classes as NC
+    rated = part_ratings.load()
+    fab_min = _fab_min_width(root)
+    xml, _ = _v2_rules()
+    by_num = {str(v["number"]): {"name": k, **v} for k, v in NC.effective(root, xml).items()}
+    sig_class = {sg.get("name"): sg.get("class") or "0" for sg in root.iterfind("./drawing/board/signals/signal")}
+    rows = {}
+    for net, v in want.items():
+        amps = v["a"]
+        parts = part_ratings.ratings_on(root, net, rated)
+        limit = None
+        if parts and parts[0]["current_a"] < amps:
+            limit = parts[0]
+            amps = limit["current_a"]
+        need = CU.required(amps, v["delta_t_c"], copper)
+        widths, fab_note = _practical(need, copper, fab_min)
+        outer = max(widths[copper[n]["name"]] for n in need if copper[n]["outer"])
+        inner = {copper[n]["name"]: widths[copper[n]["name"]] for n in need if not copper[n]["outer"]}
+        rows[net] = {"current_a": amps, "delta_t_c": v["delta_t_c"], "width_mm": widths,
+                     "ipc2221_mm": {copper[n]["name"]: w for n, w in need.items()}}
+        if fab_note:
+            rows[net]["width_note"] = fab_note
+        cls_num = sig_class.get(net, "0")
+        cls = by_num.get(cls_num)
+        if cls and cls_num != "0":
+            cw = cls["width_mm"] or 0.0
+            rows[net]["existing_class"] = {"name": cls["name"], "width_mm": cw,
+                                           "advice": _class_advice(cls["name"], cw, outer, inner)}
+            rows[net]["suggested_class"] = {"name": cls["name"], "width_mm": max(outer, cw), "existing": True}
+        else:
+            fits = sorted((c for c in by_num.values() if c["number"] != 0 and (c["width_mm"] or 0) >= outer - 1e-6),
+                          key=lambda c: c["width_mm"])
+            rows[net]["suggested_class"] = ({"name": fits[0]["name"], "width_mm": fits[0]["width_mm"], "existing": True}
+                                            if fits else {"name": f"pwr_{amps:g}A", "width_mm": outer, "existing": False})
+        if parts:
+            rows[net]["rated_parts"] = [{"ref": r["ref"], "part": r["part"], "current_a": r["current_a"],
+                                         "source": r["source"]} for r in parts]
+        if limit:
+            rows[net]["limited_by"] = (f"{limit['ref']} ({limit['part']}) is rated {limit['current_a']} A, below the "
+                                       f"{v['a']} A set for {net}: sized for the part. If more current must flow, "
+                                       "that part has to change too.")
+    return {"nets": rows, "copper": {c["name"]: {"copper_mm": c["copper_mm"], "outer": c["outer"],
+                                                 "from": c["source"]} for c in copper.values()},
+            "method": "IPC-2221 (conservative); IPC-2152 gives narrower widths for the same rise",
+            "note": ("a class width rule covers the class's pads too: narrower pads (connector pins, "
+                     "small capacitors) then fail DRC. Make the class rule a wire-only rule, or route at "
+                     "these widths and keep the class width at what the pads allow")}
+
+
+@tool(READ)
+def check_current(nets: list[str] | None = None, via_current_a: float = 1.0) -> dict:
+    """Check routed copper against the saved net currents (set_net_current): the narrowest segment
+    per layer against the IPC-2221 width for that layer's copper, and the via count against the
+    current (via_current_a per via, about 1 A for a 0.3 mm via). Layers where the net has a pour
+    are not judged by trace width."""
+    from fusion_offline import current as CU
+    dname, saved = _currents()
+    want = {n: v for n, v in saved.items() if not nets or n in nets}
+    if not want:
+        return {"design": dname, "nets": [], "note": "no currents saved: set_net_current"}
+    from . import part_ratings
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    res = CU.check(root, want, _copper(root), via_current_a)
+    rated = part_ratings.load()
+    for r in res:
+        low = [p for p in part_ratings.ratings_on(root, r["net"], rated) if p["current_a"] < r.get("current_a", 0)]
+        if low:
+            r["ok"] = False
+            r["problems"].append(", ".join(f"{p['ref']} ({p['part']}) is rated {p['current_a']} A" for p in low)
+                                 + f", below the {r['current_a']} A this net carries")
+    judged = [r for r in res if r["ok"] is not None]
+    return {"design": dname, "ok": all(r["ok"] for r in judged) if judged else None,
+            "not_routed": [r["net"] for r in res if r["ok"] is None], "nets": res}
+
+
+def _class_advice(name: str, cw: float, outer: float, inner: dict) -> str:
+    """Judge a class width against the outer layers, where class-width traces run, with inner
+    layers as a separate note; never advise narrowing the class."""
+    inner_need = max(inner.values()) if inner else 0.0
+    if cw >= outer - 1e-6:
+        text = f"{name} {cw:g} mm is enough on the outer layers (needs {outer:g} mm)"
+    else:
+        text = (f"{name} {cw:g} mm < {outer:g} mm needed on the outer layers: widen the class to {outer:g} mm "
+                "(set_net_class), pour the net, or run a parallel trace")
+    if inner_need > max(cw, outer) + 1e-6:
+        text += (f"; inner layers need {inner_need:g} mm, so use a pour or plane there" if inner_need > 3 * max(cw, outer)
+                 else f"; inner layers need {inner_need:g} mm: keep this net on the outer layers or route at least "
+                      f"{inner_need:g} mm there")
+    return text
+
+
+def _practical(need: dict, copper: dict, fab_min: float) -> tuple[dict, str | None]:
+    """IPC widths made routable: never below the fab's minimum trace width, rounded up to 0.01 mm.
+    Returns ({layer name: mm}, a note when the fab minimum, not the current, set a width)."""
+    out, floored = {}, []
+    for n, w in need.items():
+        out[copper[n]["name"]] = math.ceil(max(w, fab_min) * 100 - 1e-6) / 100
+        if w < fab_min:
+            floored.append(copper[n]["name"])
+    note = (f"{', '.join(floored)}: width set by the fab minimum ({fab_min:g} mm), not the current"
+            if floored else None)
+    return out, note
+
+
+def _width_for(net: str | None, given: float | None, root=None) -> tuple[float, str | None]:
+    """The width to route a net with: the one given, else the saved current's width on the outer
+    layers, else 0.25 mm."""
+    if given is not None:
+        return given, None
+    if net:
+        _, saved = _currents()
+        if net in saved:
+            from fusion_offline import current as CU
+            root = root if root is not None else D.read_xml(_snap(schematic=False).board_xml)
+            copper = _copper(root)
+            need = CU.required(saved[net]["a"], saved[net]["delta_t_c"], copper)
+            widths, fab_note = _practical(need, copper, _fab_min_width(root))
+            w = max(widths[copper[n]["name"]] for n in need if copper[n]["outer"])
+            return w, (f"width {w:g} mm from {net}'s {saved[net]['a']} A (IPC-2221, outer layers)"
+                       + (f"; {fab_note}" if fab_note else ""))
+    return 0.25, None
+
+
+@tool(READ)
+def check_length_groups(groups: list[str] | None = None) -> dict:
+    """Check the saved length groups of the active design against the routed board: each member's
+    path length (through series parts), its P/N skew against intra_tol_mm, its difference from
+    the group target against inter_tol_mm, pass/fail, and add_mm: how much to add to which net
+    to pass. Members with air wires left are listed as unrouted."""
+    from fusion_offline import length_groups as LG
+    dname, saved = _groups_of(None)
+    if not saved:
+        return {"design": dname, "groups": [], "note": "no length groups saved for this design: set_length_group"}
+    want = groups or sorted(saved)
+    unknown = [g for g in want if g not in saved]
+    if unknown:
+        raise ValueError(f"no length group {', '.join(unknown)}; groups: {', '.join(sorted(saved))}")
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    res = [LG.evaluate(root, saved[g]) for g in want]
+    return {"design": dname, "ok": all(r["ok"] for r in res), "groups": res}
 
 
 @tool(READ)
@@ -675,6 +1080,89 @@ def _frame_setting() -> str | None:
     return (os.environ.get("FUSION_MCP_SHEET_FRAME") or "").strip() or None
 
 
+def _sch_wires(root) -> list[tuple]:
+    return sorted((si, n.get("name"), w.get("x1"), w.get("y1"), w.get("x2"), w.get("y2"))
+                  for si, sh in enumerate(root.iterfind("./drawing/schematic/sheets/sheet"), 1)
+                  for n in sh.iterfind("./nets/net") for w in n.iter("wire"))
+
+
+def _apply_labels(plan: list[dict], dry_run: bool, design: str | None, extra: dict) -> dict:
+    """Write a label plan (fusion_offline.sch_labels) as ONE undo step and check it: every moved
+    label smashed, at its place and angle; no part moved or turned; no other label and no net
+    wire changed (the edits pick by coordinate, so anything else changing means a wrong pick)."""
+    from fusion_offline import sch_labels as SL
+    active = session.require_design(design)
+    if not plan:
+        return {"written": False, "design": active, "detail": "no labels to change", **extra}
+    out = {"design": active, "parts": [{"part": p["part"], "sheet": p["sheet"], "smash": p["smash"],
+                                        "labels": {m["label"]: {"to": m["to"], "angle": m["angle"]} for m in p["moves"]}}
+                                       for p in plan], **extra}
+    if dry_run:
+        return {"written": False, **out}
+    planned = {(p["part"], p["gate"]): p for p in plan}
+
+    def verify(before, after):
+        r0, r1 = D.read_xml(before.sch_xml), D.read_xml(after.sch_xml)
+        i0 = {(i["part"], i["gate"]): i for i in SL.instances(r0)}
+        i1 = {(i["part"], i["gate"]): i for i in SL.instances(r1)}
+        bad = []
+        for key, a in i1.items():
+            b = i0.get(key)
+            if b is None:
+                continue
+            if (abs(a["x"] - b["x"]) > 1e-3 or abs(a["y"] - b["y"]) > 1e-3 or a["mirror"] != b["mirror"]
+                    or abs((a["angle"] - b["angle"] + 180) % 360 - 180) > 0.05):
+                bad.append(f"{key[0]} itself moved or turned (a pick hit the part, not its label)")
+            p = planned.get(key)
+            for name, lab in a["labels"].items():
+                m = next((m for m in p["moves"] if m["label"] == name), None) if p else None
+                if m is None:
+                    old = b["labels"].get(name)
+                    if old and (abs(lab["x"] - old["x"]) > 1e-3 or abs(lab["y"] - old["y"]) > 1e-3):
+                        bad.append(f"{key[0]} {name} moved but was not meant to")
+                    continue
+                if not lab["smashed"]:
+                    bad.append(f"{key[0]} was not smashed")
+                elif (abs(lab["x"] - m["to"][0]) > 1e-3 or abs(lab["y"] - m["to"][1]) > 1e-3
+                      or abs((lab["angle"] - m["angle"] + 180) % 360 - 180) > 0.05):
+                    bad.append(f"{key[0]} {name} at ({lab['x']}, {lab['y']}) {lab['angle']} instead of "
+                               f"({m['to'][0]}, {m['to'][1]}) {m['angle']}")
+        if _sch_wires(r0) != _sch_wires(r1):
+            bad.append("a net wire changed (a pick hit a wire)")
+        n = sum(len(p["moves"]) for p in plan)
+        return not bad, ("; ".join(bad[:6]) if bad else f"{n} label(s) on {len(plan)} part(s) placed")
+    after, detail = session.verified_write("schematic", SL.commands(plan), verify, board=False,
+                                           design=design or active)
+    return {"written": True, "detail": detail, **out}
+
+
+@tool(CHANGE)
+def straighten_labels(parts: list[str] | None = None, prefixes: list[str] | None = None, sheet: int | None = None,
+                      side: str = "right", dry_run: bool = True, design: str | None = None) -> dict:
+    """Make the ref (>NAME) and value (>VALUE) labels of two-pin passives read horizontally whatever
+    way the symbol is turned: for each part at R90 / R270 (mirrored too) whose labels read
+    vertically, SMASH it and put each such label beside the body (NAME above the centre line,
+    VALUE below) at 0 degrees, on `side` ("right" or "left"). Labels already horizontal are left
+    alone. prefixes: which parts (default R, C, L, D) unless `parts` names them; sheet: one sheet
+    only. ONE undo step; checked afterwards (labels where planned, no part or net wire moved),
+    else undone. dry_run=true (default) lists what would change."""
+    from fusion_offline import sch_labels as SL
+    root = D.read_xml(_snap(board=False).sch_xml)
+    plan = SL.plan_straighten(root, parts, tuple(prefixes) if prefixes else ("R", "C", "L", "D"), sheet, side)
+    return _apply_labels(plan, dry_run, design, {})
+
+
+@tool(CHANGE)
+def match_labels(source: str, targets: list[str], dry_run: bool = False, design: str | None = None) -> dict:
+    """Copy a part's label layout onto other parts: the NAME and VALUE positions and angles relative
+    to the part, so pasted copies (which Fusion resets to the symbol's default) look like the
+    original. Targets are smashed as needed. ONE undo step, checked as straighten_labels."""
+    from fusion_offline import sch_labels as SL
+    root = D.read_xml(_snap(board=False).sch_xml)
+    plan, warnings = SL.plan_match(root, source, targets)
+    return _apply_labels(plan, dry_run, design, {"warnings": warnings} if warnings else {})
+
+
 @tool(ADDITIVE)
 def new_sheet(title: str = "", frame: str | None = None, sheet: int | None = None) -> dict:
     """Add a schematic sheet with your standard frame and set its headline (sheet description).
@@ -739,41 +1227,190 @@ class _IgnoreViolators:
         return False
 
 
-def _element(snap, ref):
-    return next((e for e in snap.fab().elements if e.name == ref), None)
+@tool(CHANGE)
+def move_part(ref: str, x_mm: float, y_mm: float, dry_run: bool = False, design: str | None = None) -> list:
+    """Move a board part so its origin is at (x, y) mm. dry_run=true writes nothing and returns
+    a picture of the part at its new place with courtyards, plus the problems the move would
+    introduce or clear. design: the design you mean (as get_context names it); the write is
+    refused if Fusion's active design is another one. To move several parts as one undo step,
+    use move_parts."""
+    return _move_parts([{"ref": ref, "x_mm": x_mm, "y_mm": y_mm}], dry_run, design)
 
 
 @tool(CHANGE)
-def move_part(ref: str, x_mm: float, y_mm: float) -> dict:
-    """Move a board part so its origin is at (x, y) mm."""
-    def verify(before, after):
-        e = _element(after, ref)
-        if e is None:
-            return False, f"no part {ref} on the board"
-        ok = math.isclose(e.x, x_mm, abs_tol=1e-3) and math.isclose(e.y, y_mm, abs_tol=1e-3)
-        if ok:
-            return True, f"{ref} at ({e.x}, {e.y})"
-        near = sorted((math.hypot(o.x - x_mm, o.y - y_mm), o) for o in after.fab().elements if o.name != ref)
-        near = [f"{o.name} ({'bottom' if o.mirror else 'top'}) at ({o.x}, {o.y})" for d, o in near if d < 4.0]
-        return False, (f"{ref} landed at ({e.x}, {e.y}) instead of ({x_mm}, {y_mm}); Fusion moved it aside, "
-                       "probably avoiding an overlap" + (f" with {', '.join(near)}" if near else ""))
-    with _IgnoreViolators():
-        after, detail = session.verified_write("board", C.move_part(ref, x_mm, y_mm), verify, schematic=False)
-    return {"ok": True, "detail": detail}
+def rotate_part(ref: str, angle: float, bottom: bool = False, dry_run: bool = False,
+                design: str | None = None) -> list:
+    """Set a board part's absolute rotation (degrees) and side (bottom=true places it on the
+    bottom). dry_run and design work as in move_part."""
+    return _move_parts([{"ref": ref, "angle": angle, "bottom": bottom}], dry_run, design)
 
 
 @tool(CHANGE)
-def rotate_part(ref: str, angle: float, bottom: bool = False) -> dict:
-    """Set a board part's absolute rotation (degrees) and side (bottom=true places it on the bottom)."""
+def move_parts(moves: list[dict], dry_run: bool = False, design: str | None = None) -> list:
+    """Move and/or rotate several board parts as ONE undo step.
+    moves: [{"ref": "R18", "x_mm": 75.5, "y_mm": 38.75, "angle": 180, "bottom": false}, ...];
+    leave out anything that should stay as it is (e.g. only "angle").
+    The write is checked as a whole: every listed part must end exactly where asked and no other
+    part may move (Fusion pushes parts aside in its default mode, so the moves run with
+    violations ignored); otherwise the whole batch is undone.
+    dry_run=true writes nothing: it returns a picture of the parts at their new places with
+    courtyards drawn, and what the moves would introduce or clear: courtyard overlaps (derived
+    ones marked, for parts without a library courtyard), pad gaps under the rules, and silkscreen
+    on a neighbour's pads. The same report comes back after a real write. Traces stay put in
+    the preview; in Fusion, trace ends on a moved part's pads follow it.
+    design: the design you mean (as get_context or the dry run's reply names it). The write is
+    refused if Fusion's active design is another one, checked again immediately before writing.
+    Without it, a write is still refused when these parts were last previewed on a different
+    design than the one now active (Fusion was switched in between)."""
+    return _move_parts(moves, dry_run, design)
+
+
+@tool(CHANGE)
+def place_inline(parts: list[str], x_mm: float | None = None, y_mm: float | None = None, to: str | None = None,
+                 angle: float | None = None, face_anchor: bool = True, dry_run: bool = True,
+                 design: str | None = None) -> list:
+    """Line up two-pin parts (series resistors, AC caps) on the pads they connect to, as ONE
+    undo step: x_mm puts them in one column at that x, each on the ROW of its anchor pad;
+    y_mm puts them in one row, each on its anchor pad's COLUMN. The anchor is the pad of `to`
+    (e.g. "T1") that shares a net with the part, or without `to` the connected pad of another
+    part nearest the line. The part's connecting pad lands exactly on the anchor's row/column.
+    angle: rotation for all of them (default: keep each one's); face_anchor turns a part by
+    180 degrees when that puts its connecting pad on the side facing the anchor.
+    dry_run=true (default) writes nothing and returns the preview and report of move_parts
+    (what would be introduced or cleared); run again with dry_run=false (and design=) to move.
+    Parts that are not two-pin or share no net with `to` are skipped and listed."""
+    import json
+    from fusion_offline import placement_plan as PP
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    plan = PP.inline(root, parts, x=x_mm, y=y_mm, to=to, angle=angle, face_anchor=face_anchor)
+    if not plan["moves"]:
+        return [json.dumps({"written": False, "detail": "nothing to place", "skipped": plan["skipped"]})]
+    out = _move_parts(plan["moves"], dry_run, design)
+    report = json.loads(out[-1])
+    report.update(anchors=plan["anchors"], skipped=plan["skipped"])
+    return out[:-1] + [json.dumps(report)]
+
+
+@tool(CHANGE)
+def tidy_placement(parts: list[str] | None = None, region_mm: list[float] | None = None,
+                   grid_mm: dict[str, float] | None = None, critical: list[str] | None = None,
+                   nudge_mm: float = 0.25, rework_gap_mm: float = 0.0, max_move_mm: float = 0.5,
+                   align: bool = True, spread: bool = True, rotate: bool = False, skip_routed: bool = True,
+                   keep: list[str] | None = None, dry_run: bool = True, design: str | None = None) -> list:
+    """Tidy placement as ONE undo step: snap parts to the grid (grid_mm, default
+    {"passive": 0.125, "other": 0.25}), line up rows/columns that are within 0.2 mm of lining up,
+    and even out a slightly uneven pitch along a row of one package (rows that follow a
+    neighbour's pin pitch are left alone). rotate=true also turns non-polar two-pin parts (R, C,
+    L, FB) by 180 degrees to match their row (off by default: it swaps pads and drags traces).
+    Critical parts are left alone or only nudged onto the grid by at most nudge_mm: two-pin parts
+    on a P/N pair's nets (series R, AC caps, TVS) as ONE rigid group, parts on nets with a net
+    class, decoupling caps next to IC pins, crystals, isolation bridges (a chassis/shield net to
+    another net, or pads on two different pours), and anything in `critical`.
+    Never: moves a part with traces ending on its pads (skip_routed=false to allow), moves
+    anything more than max_move_mm, introduces a courtyard overlap or a pad gap under the rules,
+    or brings courtyards closer than rework_gap_mm (or closer than they already were). Silkscreen
+    is never a reason to move. parts / region_mm [x0, y0, x1, y1] limit what may move; keep lists
+    parts to leave exactly as placed (no nudge either), e.g. a deliberately placed T1.
+    dry_run=true (default) writes nothing: the move_parts preview and report plus what each part
+    gets and why, which parts were left alone and why, and moves dropped by the rules above.
+    Run again with dry_run=false (and design=) to apply it."""
+    import json
+    from fusion_offline import placement_plan as PP
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    plan = PP.tidy(root, refs=parts, region=tuple(region_mm) if region_mm else None, grid=grid_mm,
+                   critical=critical or (), nudge=nudge_mm, rework_gap=rework_gap_mm, max_move=max_move_mm,
+                   align=align, spread=spread, rotate=rotate, skip_routed=skip_routed, keep=set(keep or ()))
+    extra = {"actions": plan["actions"], "left_alone": plan["left_alone"], "dropped": plan["dropped"],
+             "critical_count": plan["critical_count"]}
+    if not plan["moves"]:
+        return [json.dumps({"written": False, "detail": "nothing to tidy", **extra})]
+    out = _move_parts(plan["moves"], dry_run, design)
+    report = json.loads(out[-1])
+    report.update(extra)
+    return out[:-1] + [json.dumps(report)]
+
+
+_PREVIEWED_ON: dict[str, str] = {}      # part -> design its last dry run was made on (this server)
+
+
+def _move_parts(moves: list[dict], dry_run: bool, design: str | None = None) -> list:
+    import json
+    from fusion_offline import placement_check as PC
+    if not moves:
+        raise ValueError("no moves given")
+    active = session.require_design(design)
+    snap = _snap(schematic=False)
+    root = D.read_xml(snap.board_xml)
+    plan = PC.resolve_moves(root, moves)
+    todo = [t for t in plan if t["moves"] or t["turns"]]
+    refs = [t["ref"] for t in plan]
+    listing = [{"ref": t["ref"], "to": [round(t["x"], 4), round(t["y"], 4)], "angle": t["angle"],
+                "side": "bottom" if t["bottom"] else "top",
+                "from": [t["was"]["x"], t["was"]["y"]], "from_angle": t["was"]["angle"],
+                "from_side": "bottom" if t["was"]["bottom"] else "top"} for t in todo]
+    if not todo:
+        return [json.dumps({"written": False, "design": active, "detail": "every part is already where asked",
+                            "moves": []})]
+    if dry_run:
+        if active:
+            _PREVIEWED_ON.update({r: active for r in refs})
+        proposed = PC.apply_moves(root, plan)
+        effects = PC.move_effects(root, proposed, refs)
+        out = {"written": False, "design": active, "moves": listing, **effects}
+        result = [json.dumps(out)]
+        picture = _move_picture(proposed, plan, f"proposed: {len(todo)} part(s) moved (nothing written)")
+        return ([picture] if picture else []) + result
+    elsewhere = sorted({_PREVIEWED_ON[r] for r in refs if _PREVIEWED_ON.get(r) not in (None, active)})
+    if elsewhere and not design:
+        raise WriteFailed(f"these parts were last previewed on {', '.join(map(repr, elsewhere))} but Fusion's "
+                          f"active design is now {active!r} (it was switched in between): nothing was written. "
+                          "Run the dry run again on the design you mean, or pass design= to confirm it.")
+    cmds = []
+    for t in todo:
+        if t["moves"]:
+            cmds.append(C.move_part(t["ref"], t["x"], t["y"]))
+        if t["turns"]:
+            cmds.append(C.rotate_part(t["ref"], t["angle"], t["bottom"]))
+
     def verify(before, after):
-        e = _element(after, ref)
-        if e is None:
-            return False, f"no part {ref} on the board"
-        ok = math.isclose(e.angle % 360, angle % 360, abs_tol=0.05) and e.mirror == bottom
-        return ok, f"{ref} angle {e.angle} {'bottom' if e.mirror else 'top'}"
+        here = {e.name: e for e in after.fab().elements}
+        was = {e.name: e for e in before.fab().elements}
+        bad = []
+        for t in todo:
+            e = here.get(t["ref"])
+            if e is None:
+                bad.append(f"{t['ref']} is gone")
+            elif not (math.isclose(e.x, t["x"], abs_tol=1e-3) and math.isclose(e.y, t["y"], abs_tol=1e-3)
+                      and math.isclose(e.angle % 360, t["angle"], abs_tol=0.05) and e.mirror == t["bottom"]):
+                bad.append(f"{t['ref']} at ({e.x}, {e.y}) {e.angle} {'bottom' if e.mirror else 'top'} instead of "
+                           f"({t['x']:g}, {t['y']:g}) {t['angle']:g} {'bottom' if t['bottom'] else 'top'}")
+        listed = {t["ref"] for t in todo}
+        pushed = [n for n, e in here.items() if n not in listed and n in was and
+                  (abs(e.x - was[n].x) > 1e-3 or abs(e.y - was[n].y) > 1e-3 or e.mirror != was[n].mirror
+                   or abs((e.angle - was[n].angle) % 360) > 0.05)]
+        if pushed:
+            bad.append(f"Fusion also moved {', '.join(sorted(pushed)[:8])} (not in the list)")
+        return not bad, ("; ".join(bad) if bad else f"moved {len(todo)} part(s)")
     with _IgnoreViolators():
-        after, detail = session.verified_write("board", C.rotate_part(ref, angle, bottom), verify, schematic=False)
-    return {"ok": True, "detail": detail}
+        after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False,
+                                               timeout=max(60.0, 2.0 * len(todo)), design=design or active)
+    for r in refs:
+        _PREVIEWED_ON.pop(r, None)
+    effects = PC.move_effects(root, D.read_xml(after.board_xml), refs)
+    return [json.dumps({"written": True, "design": active, "detail": detail, "moves": listing, **effects})]
+
+
+def _move_picture(root, plan, title):
+    """The preview picture around the moved parts (old and new places), or None without matplotlib."""
+    from fusion_offline import render as R
+    if not R.available():
+        return None
+    xs = [v for t in plan for v in (t["x"], t["was"]["x"])]
+    ys = [v for t in plan for v in (t["y"], t["was"]["y"])]
+    region = (min(xs) - 4, min(ys) - 4, max(xs) + 4, max(ys) + 4)
+    out = os.path.join(tempfile_dir(), "fusion-electronics-mcp-move-preview.png")
+    R.render(root, out, region=region, courtyards=True, title=title)
+    return Image(path=out)
 
 
 @tool(ADDITIVE)
@@ -822,44 +1459,140 @@ def _uncovered(snap, net, wl, pts):
     return missing, lay
 
 
+def _fab_min_width(root) -> float:
+    """JLC's minimum trace width for this board's copper layer count."""
+    from . import jlc
+    return jlc.limit("min_trace_width", len(D.parse_board_design(root).copper_layers))
+
+
+@tool(READ)
+def jlc_limits() -> dict:
+    """JLCPCB's published manufacturing limits that the tools check against (trace and space,
+    same-net spacing, vias, annular rings, hole spacing, edge clearance, silkscreen, solder mask),
+    with the page they were read from and the date. JLC changes them: check the page before
+    relying on one."""
+    from . import jlc
+    return jlc.table()
+
+
+def _class_clearances(root) -> dict[str, float]:
+    """net -> its class clearance as DRC applies it (the class's design rule, else the class)."""
+    from fusion_offline import net_classes as NC
+    xml, _ = _v2_rules()
+    by_num = {str(v["number"]): v["clearance_mm"] for v in NC.effective(root, xml).values() if v["clearance_mm"]}
+    return {sg.get("name"): by_num[sg.get("class")] for sg in root.iterfind("./drawing/board/signals/signal")
+            if sg.get("class") in by_num}
+
+
 @tool(ADDITIVE)
 def route_pair(p_net: str, n_net: str, centreline_mm: list[list[float]], width_mm: float, gap_mm: float,
                layer: str = "top", p_tail_mm: list | None = None, n_tail_mm: list | None = None,
                p_head_mm: list | None = None, n_head_mm: list | None = None,
                max_skew_mm: float = 0.1, tune: bool = True, via_drill_mm: float = 0.3,
-               via_diameter_mm: float = 0.6, chamfer_mm: float = 0.5, dry_run: bool = False) -> dict:
+               via_diameter_mm: float = 0.6, chamfer_mm: float = 0.5, dry_run: bool = False,
+               layer_changes: list[dict] | None = None, margin_mm: float = 0.01,
+               tune_style: str = "rounded", tune_radius_mm: float = 0.25, tune_flat_mm: float = 0.1,
+               tune_gap_mm: float = 0.1, tune_max_height_mm: float = 0.6, tune_at: str = "longest",
+               same_net_gap_mm: float = 0.25, neck_down: bool = False, add_length_mm: float = 0.0,
+               group: str | None = None, detour_style: str = "45", detour_max_depth_mm: float = 1.0,
+               detour_side: str = "auto", design: str | None = None) -> dict:
     """Route a differential pair as two coupled traces along a centreline you choose.
 
     centreline_mm: [[x, y], ...] for the middle of the pair, from near the start pads to near the
-    end pads; use 45-degree bends. Each trace is the centreline offset by (width + gap) / 2 with
+    end pads; use 45-degree bends. A point [x, y, curve] ends an arc of `curve` degrees (+ =
+    counter-clockwise): both traces follow it concentrically, for rounded detours. Each trace is the centreline offset by (width + gap) / 2 with
     mitred corners, so the gap holds through bends, plus a short 45-degree fan-in to its pad.
     Which side is P is set by the start pads. If the end pads are the other way round the result
     says crossed=true: either approach the end pads from the other direction (no via), or pass a
     tail for one trace, [[x, y], {"via": [x, y]}, [x, y]], which changes layer at the via.
     p_head_mm / n_head_mm: explicit path from a trace's start pad to the trunk, for pins the
-    automatic 45-degree fan-in cannot reach cleanly (e.g. through a gap in a pin row).
+    automatic 45-degree fan-in cannot reach cleanly (e.g. through a gap in a pin row); they take
+    {"via": [x, y]} entries too (both heads the same number, so the trunk is on one layer).
+    layer_changes: [{"at": [x, y], "to": "bottom"}, ...] points ON the centreline where the PAIR
+    changes layer together: a via pair across the pair (spaced via diameter + via clearance +
+    margin, or the pair pitch if wider), each trace fanning out to its via at 45 degrees and back,
+    so the pair stays coupled at the same width and gap on the new layer. Needs a little straight
+    centreline either side of the point.
     Every 90-degree corner (typically where a trace leaves a pin) becomes two 45-degree bends,
     chamfer_mm along each leg (0 keeps hard corners).
-    The shorter trace gets rounded bumps until the skew is within max_skew_mm.
+    The shorter trace gets bumps on a straight run on any layer (tails after vias included)
+    until the skew is within max_skew_mm; why_not_ok says why when it cannot. tune_style
+    "rounded" (default) or "45"; tune_radius_mm, tune_flat_mm (the flat top), tune_gap_mm (between
+    bumps) and tune_max_height_mm set the shape (used on the PoE board: 0.14 / 0.12 / 0.12);
+    tune_at "mismatch" puts them on the run nearest the end whose pads cause the skew (TI
+    SPRAAR7 2.3) instead of the longest run. Neighbouring legs of one trace keep at least
+    same_net_gap_mm edge to edge (JLC 0.25 mm; the flat and gaps widen to keep it), and the whole
+    route is checked for it.
+    A conflict where a trace squeezes between two pieces of copper (e.g. between RJ45 pins) says
+    so: the room there, the width that would fit and the clearance that would. neck_down=true
+    narrows the trace only over each squeeze to the widest width that fits, never below JLC's
+    minimum trace width for the board's layer count, and lists the necks (impedance rises there:
+    check it with estimate_impedance).
+    add_length_mm lengthens BOTH traces equally (matching between pairs) with coupled detours in
+    the centreline: trapezoids with 45-degree legs (0.828 x depth each) or detour_style "rounded",
+    at most detour_max_depth_mm deep (several if needed), on detour_side "left", "right" or "auto"
+    (the side with fewer conflicts). group="MDI" (a saved length group, see set_length_group) works
+    out add_length_mm itself: the group's target minus the member's whole path (its other nets,
+    series parts and this route).
+    Clearances are the ones DRC enforces: the board's wire rules, each other net's class
+    clearance and the pair's own class clearance (from the class's design rule, else the
+    class), plus margin_mm so 45-degree rounding cannot dip below them. A pair gap below its
+    class clearance is a conflict; one equal to it is a warning.
     Nothing is written if the plan has conflicts (copper of other nets, holes, keepouts, the
-    partner trace) or dry_run=true; the plan is returned either way."""
+    partner trace) or dry_run=true; the plan is returned either way. design: as in move_parts."""
     from fusion_offline import pairs as PR
+    active = session.require_design(design)
     snap = _snap(schematic=False)
     root = D.read_xml(snap.board_xml)
     top, bottom = 1, 16
     start, other = (bottom, top) if str(layer).lower() == "bottom" else (top, bottom)
-    plan = PR.plan_pair(root, p_net, n_net, centreline_mm, width_mm, gap_mm, layer=start, other_layer=other,
-                        p_tail=p_tail_mm, n_tail=n_tail_mm, p_head=p_head_mm, n_head=n_head_mm, via_drill=via_drill_mm, via_diameter=via_diameter_mm,
-                        max_skew_mm=max_skew_mm, tune=tune, chamfer_mm=chamfer_mm)
+    net_cl = _class_clearances(root)
+    pair_cl = max((net_cl.get(n, 0.0) for n in (p_net, n_net)), default=0.0) or None
+    def plan_with(add):
+        return PR.plan_pair(root, p_net, n_net, centreline_mm, width_mm, gap_mm, layer=start, other_layer=other,
+                            p_tail=p_tail_mm, n_tail=n_tail_mm, p_head=p_head_mm, n_head=n_head_mm,
+                            via_drill=via_drill_mm, via_diameter=via_diameter_mm, max_skew_mm=max_skew_mm, tune=tune,
+                            chamfer_mm=chamfer_mm, layer_changes=layer_changes, net_clearance=net_cl,
+                            pair_clearance=pair_cl, margin=margin_mm, tune_style=tune_style, tune_radius=tune_radius_mm,
+                            tune_flat=tune_flat_mm, tune_gap=tune_gap_mm, tune_max_height=tune_max_height_mm,
+                            tune_at=tune_at, same_net_gap=same_net_gap_mm, min_width=_fab_min_width(root),
+                            neck_down=neck_down, add_length=add, detour_style=detour_style,
+                            detour_max_depth=detour_max_depth_mm, detour_side=detour_side)
+    plan = plan_with(add_length_mm)
+    if group:
+        from fusion_offline import length_groups as LG
+        _, saved = _groups_of(design)
+        if group not in saved:
+            raise ValueError(f"no length group {group!r}; groups: {', '.join(sorted(saved)) or 'none'}")
+        g = saved[group]
+        member = next((m for m in g["members"] if isinstance(m, list) and
+                       {p_net, n_net} & set(LG.path(root, m[0], g.get("follow_series", True))["nets"]
+                                            + LG.path(root, m[1], g.get("follow_series", True))["nets"])), None)
+        if member is None:
+            raise ValueError(f"{p_net}/{n_net} is not on the path of any pair in group {group!r}")
+        ev = LG.evaluate(root, g)
+        others = [r["length_mm"] for r in ev["members"] if r["nets"] != member]
+        target = ev["target_mm"] if g.get("target", "longest") != "longest" else max(others, default=0.0)
+        now = (LG.path(root, member[0])["length_mm"] + LG.path(root, member[1])["length_mm"]) / 2
+        planned = (plan["p"]["length_mm"] + plan["n"]["length_mm"]) / 2
+        need = round(target - now - planned, 4)
+        info = {"name": group, "member": "/".join(member), "target_mm": target, "path_without_route_mm": round(now, 3),
+                "route_mm": round(planned, 3), "add_mm": max(need, 0.0)}
+        if need > 1e-3:
+            plan = plan_with(need)
+        elif need < -(g.get("inter_tol_mm") or 0.0):
+            info["note"] = (f"this route already makes the member {-need:.3f} mm longer than the group target: "
+                            "shorten its path, or the others need lengthening")
+        plan["group"] = info
     if dry_run or not plan["ok"]:
-        return {"written": False, "plan": plan}
+        return {"written": False, "design": active, "plan": plan}
     wmap = {top: _write_layer("top"), bottom: _write_layer("bottom")}
     cmds, checks = [], []
     for side in ("p", "n"):
         net = plan[side]["net"]
         for t in plan[side]["traces"]:
             pts = [tuple(q) for q in t["points"]]
-            cmds.append(C.add_trace(net, wmap[t["layer"]], width_mm, pts))
+            cmds.append(C.add_trace(net, wmap[t["layer"]], t.get("width", width_mm), pts))
             checks.append((net, wmap[t["layer"]], pts))
         for vx, vy in plan[side]["vias"]:
             cmds.append(C.add_via(net, vx, vy, via_drill_mm, via_diameter_mm))
@@ -883,12 +1616,12 @@ def route_pair(p_net: str, n_net: str, centreline_mm: list[list[float]], width_m
         return (not bad), ("; ".join(bad) if bad else
                            f"{p_net}/{n_net} routed: {plan['p']['length_mm']} / {plan['n']['length_mm']} mm, "
                            f"skew {plan['skew_mm']} mm, {len(vias)} vias")
-    after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False)
-    return {"written": True, "detail": detail, "plan": plan}
+    after, detail = session.verified_write("board", " ".join(cmds), verify, schematic=False, design=design or active)
+    return {"written": True, "design": active, "detail": detail, "plan": plan}
 
 
 @tool(ADDITIVE)
-def route_trace(from_pad: str, to_pad: str, width_mm: float = 0.25, layer: str = "any",
+def route_trace(from_pad: str, to_pad: str, width_mm: float | None = None, layer: str = "any",
                 allow_vias: bool = True, clearance_mm: float | None = None, via_drill_mm: float = 0.3,
                 via_diameter_mm: float = 0.6, grid_mm: float = 0.127, dry_run: bool = True) -> dict:
     """Route one connection between two pads (PART.PAD, e.g. 'J1.A19' to 'J9.5') the way a person
@@ -896,7 +1629,9 @@ def route_trace(from_pad: str, to_pad: str, width_mm: float = 0.25, layer: str =
     clearance (or clearance_mm), keepouts and the board edge, ending exactly on the pad centres.
     layer: 'top' / 'bottom' to prefer one layer, 'any' to let it choose; vias only where needed
     (allow_vias=false forbids them). dry_run=true (default) returns the plan and a picture without
-    writing; run again with dry_run=false to draw it (checked against the board afterwards)."""
+    writing; run again with dry_run=false to draw it (checked against the board afterwards).
+    width_mm: when left out, the width the net's saved current needs (set_net_current; IPC-2221 on
+    the outer layers), else 0.25 mm."""
     from fusion_offline import router as RT
     from fusion_offline.render import render
     snap = _snap(schematic=False)
@@ -907,6 +1642,7 @@ def route_trace(from_pad: str, to_pad: str, width_mm: float = 0.25, layer: str =
     bx, by, bl, bn = RT.pad_target(root, b_ref, b_pad)
     if an != bn or an is None:
         raise ValueError(f"{from_pad} is on {an!r} and {to_pad} on {bn!r}: not the same net")
+    width_mm, width_note = _width_for(an, width_mm, root)
     pref = {"top": 1, "bottom": 16}.get(str(layer).lower())
     if pref and not allow_vias:
         al, bl = tuple(l for l in al if l == pref) or al, tuple(l for l in bl if l == pref) or bl
@@ -914,7 +1650,9 @@ def route_trace(from_pad: str, to_pad: str, width_mm: float = 0.25, layer: str =
                  prefer_layer=pref, vias=allow_vias, via_drill=via_drill_mm, via_d=via_diameter_mm, step=grid_mm)
     plan = {"p": {"net": an, "traces": [{"layer": l, "points": [list(q) for q in pts]} for l, pts in r.legs],
                   "vias": [list(v) for v in r.vias]}, "n": {"net": "", "traces": [], "vias": []}}
-    out = {"route": r.as_dict(), "written": False}
+    out = {"route": r.as_dict(), "written": False, "width_mm": width_mm}
+    if width_note:
+        out["width_from"] = width_note
     xs = [q[0] for _, pts in r.legs for q in pts] + [ax, bx]
     ys = [q[1] for _, pts in r.legs for q in pts] + [ay, by]
     with contextlib.suppress(Exception):
@@ -949,15 +1687,18 @@ def route_trace(from_pad: str, to_pad: str, width_mm: float = 0.25, layer: str =
 
 
 @tool(ADDITIVE)
-def route_net(net: str, width_mm: float = 0.25, layer: str = "any", allow_vias: bool = True,
+def route_net(net: str, width_mm: float | None = None, layer: str = "any", allow_vias: bool = True,
               clearance_mm: float | None = None, max_steps: int = 20, dry_run: bool = True) -> dict:
     """Route a whole net with route_trace's router, one airwire at a time, shortest first: each
     connection starts at a pad still unconnected and ends on the nearer of its partner pad or any
     copper the net already has (a tap), so the net grows as a tidy tree. Each step is written and
     checked before the next is planned; stops when the net has no airwires (pours count as copper).
-    dry_run=true (default) plans only the first connection and returns its picture."""
+    dry_run=true (default) plans only the first connection and returns its picture.
+    width_mm: when left out, the width the net's saved current needs (set_net_current), else
+    0.25 mm."""
     from fusion_offline import router as RT
     from fusion_offline import stitch as ST
+    width_mm, width_note = _width_for(net, width_mm)
     pref = {"top": 1, "bottom": 16}.get(str(layer).lower())
     steps = []
     for _ in range(max_steps):
@@ -1014,7 +1755,8 @@ def route_net(net: str, width_mm: float = 0.25, layer: str = "any", allow_vias: 
             pic = render(root, os.path.join(tempfile_dir(), "fusion-electronics-mcp-route.png"), highlight=f"^{re.escape(net)}$",
                          region=(min(xs) - 4, min(ys) - 4, max(xs) + 4, max(ys) + 4), plans=[pl], title=f"{net}: next {a} -> {b}")
             return {"written": False, "next": {"from": a, "to": b, **r.as_dict()}, "airwires": len(air),
-                    "picture": pic["path"], "skipped": steps}
+                    "picture": pic["path"], "skipped": steps, "width_mm": width_mm,
+                    **({"width_from": width_note} if width_note else {})}
         wmap = {1: _write_layer("top"), 16: _write_layer("bottom")}
         cmds = ["GRID MM; SET WIRE_BEND 2;"] + [C.add_trace(net, wmap[l], w, pts) for l, pts, w in r.pieces(width_mm)] +                [C.add_via(net, vx, vy, 0.3, 0.6) for vx, vy in r.vias] + ["SET WIRE_BEND 1;"]
         n_air = len(air)
@@ -1030,7 +1772,8 @@ def route_net(net: str, width_mm: float = 0.25, layer: str = "any", allow_vias: 
         steps.append({"from": a, "to": b, "length_mm": round(r.length_mm, 2), "vias": len(r.vias),
                       "ends_on": r.joined, "detail": detail})
     final = _routing_state(_snap(schematic=False))
-    return {"written": not dry_run, "net": net, "steps": steps,
+    return {"written": not dry_run, "net": net, "steps": steps, "width_mm": width_mm,
+            **({"width_from": width_note} if width_note else {}),
             "net_done": net not in final["unrouted_nets"], "routing": final}
 
 
@@ -1975,7 +2718,174 @@ def get_design_rules() -> dict:
                     "before pouring or routing: list_design_rules shows the bundled JLC .edru files")
     if vals.get("msDrill") == "0.35mm":
         warn.append("minimum drill is the 0.35 mm default; check it against your fab")
-    return {"params": vals, "warnings": warn}
+    from fusion_offline import rules_edit as RE
+    more = RE.settings(x)
+    return {"params": vals, "teardrops": more["teardrops"], "pair": more["pair"],
+            "clearances_mm": more["clearances_mm"], "warnings": warn + more["warnings"]}
+
+
+def _v2_rules() -> tuple[str | None, str]:
+    """The board's V2 design rules XML and a note on how fresh it is (Fusion's working copy)."""
+    try:
+        res = session.bridge.call("design_rules", timeout=60)
+    except BridgeOpError as ex:
+        return None, f"design rules not readable ({ex.message})"
+    return res["xml"], f"rules as Fusion last wrote them ({res.get('modified')}); unsaved rule edits may not show yet"
+
+
+def _rules_base(allow_unsaved: bool):
+    """(board root, V2 rules XML, how fresh, design name) to build a rule file from. Refuses while
+    the design has unsaved changes: the rules are read as last saved, and loading a rule file
+    replaces all rules, so rules made since the save would be lost."""
+    doc = session.context().get("active_document") or {}
+    if doc.get("modified") and not allow_unsaved:
+        raise ValueError(f"{doc.get('name')!r} has unsaved changes. The rule file is built from the rules as last "
+                         "saved, and loading it replaces all rules, so rules made since the save would be lost. "
+                         "Save the design first, or pass allow_unsaved=true if no rules changed since the save.")
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    xml, note = _v2_rules()
+    if xml is None:
+        raise ValueError(f"cannot build the rule file: {note}")
+    return root, xml, note, doc.get("name") or "board"
+
+
+def _save_rule_file(name: str, text: str, out_dir: str | None) -> str:
+    from . import data_dir
+    folder = out_dir or data_dir("rules")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, re.sub(r"[^\w.+-]+", "_", name) + ".edru")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return path
+
+
+@tool(ADDITIVE)
+def edit_design_rules(teardrops: dict | None = None, pair_max_length_difference_mm: float | None = None,
+                      pair_gap_factor: float | None = None, clearances_mm: dict | None = None,
+                      out_dir: str | None = None, allow_unsaved: bool = False) -> dict:
+    """Change design rules WITHOUT touching the design (the API cannot write rules): writes a rule
+    file (.edru) from the board's current rules with the changes, every class kept, to load in
+    Fusion's DRC dialog (Rules > Load).
+    teardrops: {"via" | "pad" | "smd" | "wire_polygon" | "all": {"auto_generate": true,
+    "lengthratio": 0.5, "widthratio": 0.7, "curved_sides": true, "enabled": true}} (only the keys
+    given change). pair_max_length_difference_mm: the P/N skew DRC allows in a pair (the EAGLE
+    default 10 mm checks nothing useful; see length_tolerances); pair_gap_factor: Fusion's pair gap
+    factor. clearances_mm: built-in clearances {"wire_wire", "wire_pad", "wire_via", "pad_pad",
+    "pad_via", "via_via": mm}. Refuses while the design has unsaved changes (allow_unsaved to override).
+    get_design_rules shows the current values."""
+    from fusion_offline import rules_edit as RE
+    root, xml, note, board_name = _rules_base(allow_unsaved)
+    classes = {int(c.get("number")): c.get("name") for c in root.iterfind("./drawing/board/classes/class")}
+    text, changes, unchanged = RE.edit(xml, classes, teardrops, pair_max_length_difference_mm, pair_gap_factor,
+                                       clearances_mm, title=f"{board_name} (edited rules)")
+    if not changes:
+        return {"file": None, "changes": [], "unchanged": unchanged, "based_on": note,
+                "note": "every value asked for is already in the rules: no file written"}
+    path = _save_rule_file(f"{board_name} rules", text, out_dir)
+    return {"file": path, "changes": changes, "unchanged": unchanged, "based_on": note,
+            "next": ["In Fusion open the DRC / Design Rules dialog, Rules > Load, and pick this file.",
+                     "Check with get_design_rules."]}
+
+
+@tool(READ)
+def list_net_classes() -> dict:
+    """Net classes of the open board: number, name, width, drill, clearance, how many nets use
+    each, and the DRC rules that apply to each class. Warns about added rules that are not
+    scoped to a class (they apply to ALL copper; the CLASS command leaves such rules) and about
+    classes whose values and DRC rules disagree, and about class width rules wider than pads on
+    the class's nets (a class width rule also covers pads, so DRC flags them). A class's clearance
+    is also the gap Fusion uses for differential pairs in that class."""
+    from fusion_offline import net_classes as NC
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    xml, note = _v2_rules()
+    out = NC.summarize(root, xml, NC.pad_widths(root))
+    out["rules_source"] = note
+    return out
+
+
+@tool(ADDITIVE)
+def set_net_class(name: str, width_mm: float, clearance_mm: float, drill_mm: float | None = None,
+                  number: int | None = None, out_dir: str | None = None, allow_unsaved: bool = False) -> dict:
+    """Create or update a net class WITHOUT touching the design: writes a rule file (.edru) made
+    from the board's current rules, with every existing class kept and this class's width,
+    drill and clearance rules scoped to it the way Fusion writes them. Load it in Fusion:
+    DRC (Design Rules) > Rules > Load, pick the file. Then check with list_net_classes and put
+    nets in the class with assign_net_class. The class's clearance is also Fusion's diff-pair
+    gap for that class: keep it at or below the pair gap you route with.
+    (The EAGLE CLASS command is never used: on Fusion 2705 it made rules that hit ALL copper and
+    survived UNDO.) Without drill_mm, the class gets no drill rule.
+    The file is built from the rules as Fusion last SAVED them, and loading a rule file replaces
+    all rules: with unsaved changes, rules made since the last save would be lost. So it refuses
+    while the design has unsaved changes; save first (allow_unsaved=true to build it anyway)."""
+    from fusion_offline import net_classes as NC
+    root, xml, note, board_name = _rules_base(allow_unsaved)
+    classes = [{"number": int(c.get("number")), "name": c.get("name")}
+               for c in root.iterfind("./drawing/board/classes/class")]
+    text, cls = NC.build_edru(xml, classes, name, width_mm, clearance_mm, drill_mm, number,
+                              title=f"{board_name} + class {name}")
+    path = _save_rule_file(f"{board_name} class {name}", text, out_dir)
+    return {"file": path, "class": cls, "based_on": note,
+            "next": ["In Fusion open the DRC / Design Rules dialog, Rules > Load, and pick this file.",
+                     "Run list_net_classes: the class should show its width, drill and clearance, with matching "
+                     "rules and no warnings.",
+                     "Assign nets with assign_net_class."],
+            "by_hand_instead": (f"Design Rules > Net Classes > New: name {name}, width {width_mm} mm, clearance "
+                                f"{clearance_mm} mm" + (f", drill {drill_mm} mm" if drill_mm else "") + ".")}
+
+
+def _net_class_map(root) -> dict[str, str]:
+    """net -> class number, from a board or schematic export."""
+    return {n.get("name"): n.get("class") or "0" for n in root.iter() if n.tag in ("signal", "net")
+            and n.get("name") is not None}
+
+
+@tool(CHANGE)
+def assign_net_class(class_name: str, nets: list[str], design: str | None = None) -> dict:
+    """Put nets in an existing net class, as ONE undo step. Each net is picked in the schematic at
+    the middle of one of its own wires with no other net within 0.05 mm (CHANGE CLASS does not take
+    net names), sheet by sheet. Verified afterwards in the board and schematic: every listed net
+    must have the class and no other net's class may change, else it is undone. Nets with no
+    pickable wire are refused before anything is written. Create the class first (set_net_class).
+    design: as in move_parts."""
+    from fusion_offline import net_classes as NC
+    if not nets:
+        raise ValueError("no nets given")
+    active = session.require_design(design)
+    snap = _snap()
+    if snap.sch_xml is None:
+        raise ValueError("no schematic is linked to this board")
+    sch = D.read_xml(snap.sch_xml)
+    classes = {c.get("name"): c.get("number") for c in sch.iter("class") if c.get("name") is not None}
+    exact = next((n for n in classes if n.casefold() == class_name.casefold()), None)
+    if exact is None:
+        raise ValueError(f"no net class {class_name!r}; classes: {', '.join(sorted(classes))}. Create it with set_net_class")
+    num = classes[exact]
+    nets = list(dict.fromkeys(nets))
+    before = _net_class_map(sch)
+    todo = [n for n in nets if before.get(n) != num]
+    if not todo:
+        return {"ok": True, "detail": f"all {len(nets)} nets are already in {exact}", "design": active}
+    points, failures = NC.pick_points(sch, todo)
+    if failures:
+        raise ValueError("nothing was written; cannot pick: " + "; ".join(f"{n}: {w}" for n, w in failures.items()))
+
+    def verify(b, a):
+        bad = []
+        for which, x0, x1 in (("schematic", b.sch_xml, a.sch_xml), ("board", b.board_xml, a.board_xml)):
+            if x0 is None or x1 is None:
+                continue
+            m0, m1 = _net_class_map(D.read_xml(x0)), _net_class_map(D.read_xml(x1))
+            wrong = [n for n in todo if n in m1 and m1[n] != num]
+            if wrong:
+                bad.append(f"{which}: not in {exact}: {', '.join(wrong[:8])}")
+            other = [n for n in m1 if n not in todo and m0.get(n, m1[n]) != m1[n]]
+            if other:
+                bad.append(f"{which}: other nets changed class too: {', '.join(sorted(other)[:8])}")
+        return not bad, ("; ".join(bad) if bad else f"{len(todo)} net(s) now in {exact} (class {num})")
+    after, detail = session.verified_write("schematic", NC.change_class_commands(exact, points), verify,
+                                           design=design or active)
+    return {"ok": True, "detail": detail, "design": active, "picked": {n: list(p) for n, p in points.items()},
+            "already": [n for n in nets if n not in todo]}
 
 
 def _routing_state(sn) -> dict:
@@ -2051,12 +2961,24 @@ def autoroute(nets: list[str] | None = None, engine: str = "fusion", timeout_s: 
 
 @tool(READ)
 def render_board(highlight_nets: str | None = None, region_mm: list[float] | None = None, traces: bool = True,
-                 plan: dict | None = None, out_path: str | None = None) -> list:
+                 plan: dict | None = None, out_path: str | None = None, courtyards: bool = False,
+                 silkscreen: bool = False, pad_numbers: bool = False,
+                 courtyard_ignore: list[str] | None = None) -> list:
     """Picture of the board as Fusion has it now (from a fresh export): outline, pads, holes,
-    keepouts, part names, traces (top red solid, bottom blue dashed), vias, pour outlines.
+    keepouts, part names, package silkscreen outlines, traces (top red solid, bottom blue dashed),
+    vias, pour outlines.
     highlight_nets: regex of nets to colour and label at their pads. region_mm: [x0, y0, x1, y1]
-    to zoom. plan: a route_pair plan (from dry_run) drawn on top before writing it. Returns the
-    PNG and where it was saved. Needs matplotlib (optional install)."""
+    to zoom. plan: a route_pair plan (from dry_run) drawn on top before writing it.
+    courtyards: draw each part's courtyard (tKeepout/bKeepout, layers 39/40; top teal solid,
+    bottom purple dash-dot). Overlapping courtyards are outlined red with the overlap filled red;
+    courtyards whose edges just touch (within 0.01 mm, not a violation) are outlined orange. The
+    conflicts are summarised in the reply (overlaps listed, touching pairs counted). Use this
+    before claiming parts overlap. A courtyard that wholly holds 3 or more other parts (a module
+    or shield-can outline on the keepout layer) is skipped and drawn grey dotted;
+    courtyard_ignore skips more parts by name.
+    silkscreen: also draw silkscreen rects, polygons and part names where they are placed.
+    pad_numbers: label every pad with its pad name.
+    Returns the PNG and where it was saved. Needs matplotlib (optional install)."""
     from fusion_offline import render as R
     if not R.available():
         raise ValueError('render_board needs matplotlib: pip install "fusion-electronics-mcp[render]"')
@@ -2064,9 +2986,14 @@ def render_board(highlight_nets: str | None = None, region_mm: list[float] | Non
     root = D.read_xml(_snap(schematic=False).board_xml)
     out = out_path or os.path.join(tempfile.gettempdir(), "fusion-electronics-mcp-board.png")
     info = R.render(root, out, highlight_nets, traces, tuple(region_mm) if region_mm else None,
-                    [plan] if plan else None)
-    return [Image(path=out), f"saved {out}; {info['traces']} trace segments, {info['vias']} vias; "
-                             f"highlighted {', '.join(info['highlighted_nets']) or 'none'}"]
+                    [plan] if plan else None, courtyards=courtyards, silkscreen=silkscreen,
+                    pad_numbers=pad_numbers, courtyard_ignore=courtyard_ignore)
+    text = (f"saved {out}; {info['traces']} trace segments, {info['vias']} vias; "
+            f"highlighted {', '.join(info['highlighted_nets']) or 'none'}")
+    if courtyards:
+        from fusion_offline import footprints as FP
+        text += "; courtyards: " + FP.summary(info["courtyard_conflicts"], info["courtyards_skipped"])
+    return [Image(path=out), text]
 
 
 @tool(READ)
@@ -2094,6 +3021,40 @@ def suggest_placement_moves(exclude_nets: list[str] = ["GND"], fixed: list[str] 
     from fusion_offline import placement as PL
     m = PL.load(D.read_xml(_snap(schematic=False).board_xml))
     return PL.suggest(m, tuple(exclude_nets), tuple(fixed or ()), top=top, radius=radius_mm)
+
+
+@tool(READ)
+def check_placement(parts: list[str] | None = None, region_mm: list[float] | None = None,
+                    check_alignment: bool = False, grid_mm: dict[str, float] | None = None,
+                    derive_missing_courtyards: bool = False, courtyard_margin_mm: float = 0.25,
+                    derived_courtyard_from: str = "body", alignment_reach_mm: float = 5.0,
+                    ignore: list[str] | None = None, top: int = 20) -> dict:
+    """Check placement before routing (reads the board, changes nothing):
+    - courtyards (layers 39/40): overlaps with depth; edges that just touch are counted, not
+      flagged. A courtyard that wholly holds 3+ other parts (module or shield-can outline) is
+      skipped, and a small part wholly inside a courtyard 4x its size or more (a marker in a
+      module outline) is reported as "inside", not as an overlap. Parts whose library has no
+      courtyard are listed; derive_missing_courtyards=true checks them with a box plus
+      courtyard_margin_mm around derived_courtyard_from: "body" (pads and the tDocu outline,
+      default), "pads" or "outline" (also silkscreen, which overstates).
+    - pad gaps: pads of different parts and nets closer than the design rules (SMD-SMD,
+      SMD-pad, pad-pad), using true pad shapes.
+    - silkscreen on pads: silkscreen lines, shapes and part names over pad copper on the same
+      side (text size is estimated).
+    - tidiness: part origins off the grid (grid_mm, default {"passive": 0.125, "other": 0.25}),
+      rows/columns within 0.2 mm of lining up, mixed rotations and uneven pitch among the same
+      package in a row. A row whose parts each line up with pins of one neighbour follows its
+      pin pitch and is listed separately, not as uneven.
+    - check_alignment=true: two-pin parts linked point-to-point to a pad within
+      alignment_reach_mm, judged against their better-aligned end (reported, with the other
+      end), and how far they sit off that pad's row (side by side) or column (stacked).
+    parts / region_mm [x0, y0, x1, y1] limit the check; ignore skips parts from the courtyard
+    check. Lists are cut to `top` entries, with full counts."""
+    from fusion_offline import placement_check as PC
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    return PC.check(root, refs=parts, region=tuple(region_mm) if region_mm else None, alignment=check_alignment,
+                    grid=grid_mm, derive_missing=derive_missing_courtyards, margin=courtyard_margin_mm,
+                    ignore=ignore, top=top, derive_from=derived_courtyard_from, reach_mm=alignment_reach_mm)
 
 
 @tool(ADDITIVE)

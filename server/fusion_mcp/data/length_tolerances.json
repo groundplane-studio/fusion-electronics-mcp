@@ -1,0 +1,119 @@
+{
+  "title": "Typical length-matching tolerances",
+  "note": "Typical starting points from vendor documents; the SoC/PHY design guide for your part always wins. Times convert to length with TI's rule of thumb 1 ps = 5 mil (0.127 mm) for stripline; microstrip is about 10% faster (TI divides microstrip length by 1.1). Values were read from the cited documents on the date given; a field is null where no source could be read or confirmed, with the reason in notes.",
+  "checked": "2026-10-07",
+  "rows": [
+    {
+      "interface": "1000BASE-T MDI (Gigabit Ethernet, PHY to magnetics/RJ45)",
+      "impedance": "100 ohm differential +-10%",
+      "within_pair": {"value": "20 mil", "mm": 0.508},
+      "between_pairs": null,
+      "notes": "SNLA387 says the MDI traces should be length-matched within 20 mil for 1G (it does not say within or between pairs), total length under 2 in. Between-pair figures quoted elsewhere (TI E2E answers on DP83867E/DP83869HM: 250 mil maximum, ideally 20 mil; NVIDIA Jetson Orin NX/Nano design guide DG-10931: about 0.22-0.25 mm) could not be read to confirm (E2E returned 403; the NVIDIA guide needs a developer login).",
+      "source": {"doc": "TI SNLA387, Ethernet PHY PCB Design Layout Checklist (June 2021)", "section": "MDI Traces", "url": "https://www.ti.com/lit/an/snla387/snla387.pdf"}
+    },
+    {
+      "interface": "100BASE-TX / 10BASE-T MDI",
+      "impedance": "100 ohm differential +-10%",
+      "within_pair": {"value": "50 mil", "mm": 1.27},
+      "between_pairs": null,
+      "notes": "SNLA387: MDI traces length-matched within 50 mil for 100M or 10M; under 2 in.",
+      "source": {"doc": "TI SNLA387, Ethernet PHY PCB Design Layout Checklist (June 2021)", "section": "MDI Traces", "url": "https://www.ti.com/lit/an/snla387/snla387.pdf"}
+    },
+    {
+      "interface": "RGMII / MII (MAC to PHY, single-ended)",
+      "impedance": "50 ohm single-ended +-10%",
+      "within_pair": null,
+      "between_pairs": {"value": "20 mil (1G), 50 mil (100M/10M)", "mm": 0.508},
+      "notes": "SNLA387: MII traces length-matched within 20 mil for 1G, 50 mil for 100M/10M; RX traces to the other RX traces and TX to TX; under 6 in. Renesas R01AN6272EJ0141 (RZ/G, Rev. 1.41): RXC, RD[3:0] and RX_CTL the same length (clock not shorter), likewise TXC, TD[3:0], TX_CTL; the clock delay comes from RGMII-ID (receiver skew 1.0-2.6 ns), not from PCB length.",
+      "source": {"doc": "TI SNLA387 (June 2021); Renesas R01AN6272EJ0141 Rev. 1.41, PCB Design Guideline for RGMII Interface", "section": "MII Traces; section 3", "url": "https://www.ti.com/lit/an/snla387/snla387.pdf"}
+    },
+    {
+      "interface": "SGMII",
+      "impedance": "95 ohm differential (90.25-99.75) on AM65x",
+      "within_pair": {"value": "5 mil", "mm": 0.127},
+      "between_pairs": null,
+      "notes": "Row 'Skew within any USB3/PCIe/SGMII differential pair'. TX and RX pairs need not match each other (SPRAAR7 2.3).",
+      "source": {"doc": "TI SPRAAR7J, High-Speed Interface Layout Guidelines (Feb 2023)", "section": "Table A-5 (AM65xx/DRA80xM)", "url": "https://www.ti.com/lit/an/spraar7j/spraar7j.pdf"}
+    },
+    {
+      "interface": "USB 2.0 High-Speed",
+      "impedance": "90 ohm differential (81-99)",
+      "within_pair": {"value": "50 mil", "mm": 1.27},
+      "between_pairs": null,
+      "notes": "Same 50 mil in Tables A-1, A-3, A-4, A-7, A-8; trace length 4000-12000 mil depending on SoC.",
+      "source": {"doc": "TI SPRAAR7J, High-Speed Interface Layout Guidelines (Feb 2023)", "section": "Table A-3 (KeyStone II) and others", "url": "https://www.ti.com/lit/an/spraar7j/spraar7j.pdf"}
+    },
+    {
+      "interface": "USB 3.x SuperSpeed",
+      "impedance": "90 ohm differential (83.7-96.3); 95 ohm (90.25-99.75) on AM65x/AM64x",
+      "within_pair": {"value": "5 mil", "mm": 0.127},
+      "between_pairs": null,
+      "notes": "TX and RX pairs need not match each other; match intra-pair at the mismatched end (SPRAAR7 2.3).",
+      "source": {"doc": "TI SPRAAR7J, High-Speed Interface Layout Guidelines (Feb 2023)", "section": "Table A-3; Table A-5", "url": "https://www.ti.com/lit/an/spraar7j/spraar7j.pdf"}
+    },
+    {
+      "interface": "PCIe (Gen 1-3 as in the TI tables)",
+      "impedance": "100 ohm differential (90-110); 95 ohm (90.25-99.75) on AM65x/AM64x",
+      "within_pair": {"value": "5 mil", "mm": 0.127},
+      "between_pairs": {"value": "550 mil total between all RX pairs, and between all TX pairs (KeyStone II); RX 6 ns / TX 1.5 ns (AM65x/AM64x)", "mm": 13.97},
+      "notes": "Lane-to-lane allowances differ a lot by SoC: use the one for your part. mm is the 550 mil figure.",
+      "source": {"doc": "TI SPRAAR7J, High-Speed Interface Layout Guidelines (Feb 2023)", "section": "Tables A-3, A-4 (550 mil); A-5, A-6 (ns)", "url": "https://www.ti.com/lit/an/spraar7j/spraar7j.pdf"}
+    },
+    {
+      "interface": "SATA",
+      "impedance": "100 ohm differential (85-115)",
+      "within_pair": {"value": "5 mil", "mm": 0.127},
+      "between_pairs": null,
+      "notes": "TX and RX pairs need not match each other.",
+      "source": {"doc": "TI SPRAAR7J, High-Speed Interface Layout Guidelines (Feb 2023)", "section": "Table A-3", "url": "https://www.ti.com/lit/an/spraar7j/spraar7j.pdf"}
+    },
+    {
+      "interface": "HDMI 1.4/2.0 TMDS",
+      "impedance": "100 ohm differential (90-110)",
+      "within_pair": {"value": "5 mil", "mm": 0.127},
+      "between_pairs": null,
+      "notes": "From the row 'Skew within any USB3/SATA/PCIe/HDMI differential pair' of Table A-2 (AM57xx); that table's text extracts with jumbled columns, so read it on the page before relying on it. Between-pair figures (e.g. Intel AN 952) were not confirmed.",
+      "source": {"doc": "TI SPRAAR7J, High-Speed Interface Layout Guidelines (Feb 2023)", "section": "Table A-2 (AM57xx/DRA7xx)", "url": "https://www.ti.com/lit/an/spraar7j/spraar7j.pdf"}
+    },
+    {
+      "interface": "MIPI CSI-2 (D-PHY)",
+      "impedance": "100 ohm differential (85-115), loosely coupled; 50 ohm single-ended",
+      "within_pair": {"value": "must meet the D-PHY mode-conversion limits; general estimate UI/50 (8 ps at UI 400 ps)", "mm": 1.016},
+      "between_pairs": {"value": "lane skew 40 ps = 0.1 UI at 1.25 GHz", "mm": 5.08},
+      "notes": "Loosely coupled because D-PHY also signals single-ended at low power. mm values use 1 ps = 0.127 mm at UI 400 ps; scale with your UI. DSI uses the same D-PHY, but this source covers CSI.",
+      "source": {"doc": "TI SPRAAR7J, High-Speed Interface Layout Guidelines (Feb 2023)", "section": "Tables A-7 (AM62x), A-8 (AM62Ax) and notes", "url": "https://www.ti.com/lit/an/spraar7j/spraar7j.pdf"}
+    },
+    {
+      "interface": "DDR4",
+      "impedance": "set by the SoC guide's impedance table (Table 1-1)",
+      "within_pair": {"value": "CK P/N 0.4 ps per segment, 0.8 ps total; DQS P/N 0.4 ps", "mm": 0.051},
+      "between_pairs": {"value": "DQS to DQ within a byte 2 ps; ADDR_CTRL to CK 3 ps per segment, 4 ps total; byte length up to 500 ps; byte-to-byte matching neither required nor recommended", "mm": 0.254},
+      "notes": "Lengths in ps are stripline-equivalent (1 ps = 5 mil; microstrip / 1.1). mm values: 0.4 ps and 2 ps.",
+      "source": {"doc": "TI SPRAD06C, AM62x, AM62Lx DDR Board Design and Layout Guidelines (rev. March 2025)", "section": "Tables 2-6, 2-7", "url": "https://www.ti.com/lit/an/sprad06c/sprad06c.pdf"}
+    },
+    {
+      "interface": "LPDDR4 (PHY with per-bit deskew)",
+      "impedance": "set by the SoC guide's impedance table (Table 1-1)",
+      "within_pair": {"value": "CK P/N 0.75 ps; DQS P/N 1.5 ps", "mm": 0.095},
+      "between_pairs": {"value": "DQS to its byte 150 ps; ADDR_CTRL to CK +-312.5 ps; CK longer than each DQS by 0-3 tCK; a DQ at most 49 ps shorter than its DQS", "mm": 19.05},
+      "notes": "Per-bit deskew in the PHY loosens these; a PHY without it needs far tighter matching. mm values: 0.75 ps and 150 ps.",
+      "source": {"doc": "TI SPRAD06C, AM62x, AM62Lx DDR Board Design and Layout Guidelines (rev. March 2025)", "section": "Tables 3-6, 3-7", "url": "https://www.ti.com/lit/an/sprad06c/sprad06c.pdf"}
+    },
+    {
+      "interface": "DDR3",
+      "impedance": null,
+      "within_pair": null,
+      "between_pairs": null,
+      "notes": "Not confirmed: the Intel EMIF length-matching page cited (ADDR/CMD to CK +-20 ps) no longer exists. Use your SoC's DDR3 guide.",
+      "source": null
+    },
+    {
+      "interface": "eMMC / SD (HS200), QSPI/OSPI, LVDS / FPD-Link, DisplayPort / eDP, HDMI 2.1 FRL, USB4, MIPI C-PHY, DDR5, 2.5G-10GBASE-T",
+      "impedance": null,
+      "within_pair": null,
+      "between_pairs": null,
+      "notes": "No primary source read yet; secondary figures (e.g. eMMC CLK to CMD/DAT 250 mil, DisplayPort intra 5 mil, HDMI 2.1 intra 3 mil, 10GBASE-T intra 5 mil) are left out until checked against a vendor guide.",
+      "source": null
+    }
+  ]
+}

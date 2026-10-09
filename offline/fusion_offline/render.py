@@ -1,17 +1,22 @@
 """Render a board (EAGLE XML export) to PNG for review and route planning.
 
 Draws what the export holds, not what a tool intended: outline, pads (by
-net), holes, keepouts, part names, traces by layer, vias, pour outlines,
-and optionally planned pair routes (route_pair plans) on top. Needs
+net), holes, keepouts, part names, package silkscreen outlines, traces by
+layer, vias, pour outlines, and optionally planned pair routes (route_pair
+plans) on top. Optional layers: courtyards (39/40, with overlaps filled red
+and touching pairs outlined orange), the rest of the silkscreen (rects,
+polygons, part names as placed) and pad numbers. Needs
 matplotlib, an optional dependency: pip install "fusion-electronics-mcp[render]".
 """
 
 from __future__ import annotations
 
 import math
+import textwrap
 import re
 import xml.etree.ElementTree as ET
 
+from . import footprints as FP
 from .eagle import parse_rot
 from .pairs import flatten
 from .stitch import board_obstacles
@@ -29,10 +34,12 @@ def available() -> bool:
 
 def render(root: ET.Element, out_path: str, highlight: str | None = None, traces: bool = True,
            region: tuple[float, float, float, float] | None = None, plans: list[dict] | None = None,
-           title: str | None = None) -> dict:
+           title: str | None = None, courtyards: bool = False, silkscreen: bool = False,
+           pad_numbers: bool = False, courtyard_ignore: list[str] | None = None) -> dict:
     """Write a PNG of the board to out_path. highlight: regex of nets to
     colour and label at their pads. region: (x0, y0, x1, y1) mm to zoom.
-    Returns a short legend of what was drawn."""
+    Returns a short legend of what was drawn (with courtyard conflicts when
+    courtyards are drawn)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -118,6 +125,46 @@ def render(root: ET.Element, out_path: str, highlight: str | None = None, traces
         ax.text(float(t.get("x")), float(t.get("y")), t.text or "", fontsize=float(t.get("size") or 1) * pt_per_mm * 0.95,
                 rotation=tr, ha=ha, va=va, color=silk[t.get("layer")], family="monospace", weight="bold",
                 clip_on=True)
+    if silkscreen:
+        for it in FP.silkscreen(root):
+            c = silk[it["layer"]]
+            if it["kind"] in ("rect", "polygon"):
+                ax.add_patch(Polygon(it["points"], fc=c, ec=c, lw=0.4, alpha=0.7))
+            else:
+                al = it["align"].split("-")
+                va = {"bottom": "bottom", "center": "center", "top": "top"}.get(al[0], "bottom")
+                ha = {"left": "left", "center": "center", "right": "right"}.get(al[-1], "center") if len(al) > 1 else "center"
+                ax.text(it["x"], it["y"], it["text"], fontsize=it["size"] * pt_per_mm * 0.95, rotation=it["angle"],
+                        rotation_mode="anchor", ha=ha, va=va, color=c, family="monospace", clip_on=True)
+    conflicts, skipped = [], {}
+    if courtyards:
+        cys = FP.courtyards(root)
+        skipped = FP.enclosing(cys)
+        ignored = set(skipped) | set(courtyard_ignore or ())
+        conflicts = FP.courtyard_conflicts(cys, ignore=ignored)
+        hot = {}
+        for cf in conflicts:
+            if cf["status"] not in ("overlap", "touching"):
+                continue
+            for r in (cf["a"], cf["b"]):
+                if hot.get(r) != "overlap":
+                    hot[r] = cf["status"]
+        for key, cy in cys.items():
+            base = "#008b8b" if cy.side == "top" else "#8b5a8b"
+            edge = {"overlap": "red", "touching": "darkorange"}.get(hot.get(cy.ref), base)
+            off = cy.ref in ignored
+            for poly in cy.polygons:
+                ax.add_patch(Polygon(poly, fc="none", ec="grey" if off else edge,
+                                     ls=":" if off else "-." if cy.side == "bottom" else "-",
+                                     lw=1.2 if cy.ref in hot else 0.6))
+        for cf in conflicts:
+            for poly in cf.get("region", []):
+                ax.add_patch(Polygon(poly, fc="red", ec="red", alpha=0.45, lw=0.5))
+    if pad_numbers:
+        for ref, pad, px, py, side in FP.pad_names(root):
+            if x0 - 1 <= px <= x1 + 1 and y0 - 1 <= py <= y1 + 1:
+                ax.text(px, py, pad, fontsize=max(3.0, min(7.0, 0.5 * pt_per_mm)), ha="center", va="center",
+                        color="black" if side != "bottom" else "#333366", clip_on=True)
     for el in board.iterfind("./elements/element"):
         _, mir = parse_rot(el.get("rot"))
         ex, ey = float(el.get("x")), float(el.get("y"))
@@ -166,9 +213,14 @@ def render(root: ET.Element, out_path: str, highlight: str | None = None, traces
     ax.set_xticks([t for t in range(int(x0) - int(x0) % step, int(x1) + step, step)])
     ax.set_yticks([t for t in range(int(y0) - int(y0) % step, int(y1) + step, step)])
     ax.grid(True, lw=0.3, alpha=0.5)
-    ax.set_title(title or "top: red solid, bottom: blue dashed, pours dotted, vias gold", fontsize=9)
+    legend = "top: red solid, bottom: blue dashed, pours dotted, vias gold"
+    if courtyards:
+        legend += "; courtyards teal (bottom purple), overlap red, touching orange, skipped grey dotted"
+    ax.set_title("\n".join(textwrap.wrap(title or legend, max(30, int(fig.get_size_inches()[0] * 13)))), fontsize=9)
     plt.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
     return {"path": out_path, "traces": n_wires, "vias": n_vias, "highlighted_nets": nets,
-            "region_mm": [x0, y0, x1, y1]}
+            "region_mm": [x0, y0, x1, y1],
+            "courtyard_conflicts": [{k: v for k, v in c.items() if k != "region"} for c in conflicts],
+            "courtyards_skipped": skipped}

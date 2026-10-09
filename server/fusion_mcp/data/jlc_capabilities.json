@@ -1,0 +1,28 @@
+{
+  "fab": "JLCPCB",
+  "source": "https://jlcpcb.com/capabilities/pcb-capabilities",
+  "retrieved": "2026-10-07",
+  "note": "Read from JLCPCB's published rigid PCB capabilities page on the date above (1 oz copper unless stated). JLC changes these; check the page before relying on a limit. Values in mm.",
+  "limits": {
+    "min_trace_width": {"two_layer": 0.10, "multilayer": 0.09, "text": "Min. track width and spacing (1 oz): 0.10/0.10 mm (2-layer), 0.09/0.09 mm (multilayer); 3 mil is acceptable in BGA fan-outs"},
+    "min_trace_spacing": {"two_layer": 0.10, "multilayer": 0.09, "text": "as min_trace_width"},
+    "same_net_track_spacing": {"all": 0.25, "text": "Same-net track spacing: 0.25mm"},
+    "trace_coil_spacing": {"masked": 0.15, "unmasked_enig": 0.25, "text": "Trace coils: 0.15/0.15mm (covered by solder mask); 0.25/0.25 mm uncovered, ENIG only"},
+    "min_via_drill": {"all": 0.15, "preferred": 0.2, "text": "Min. via hole 0.15 mm; 0.1 mm only for boards up to 1 mm thick with ENIG/OSP"},
+    "min_via_diameter": {"all": 0.25, "text": "Via diameter should be 0.1mm (0.15mm preferred) larger than the via hole"},
+    "via_hole_to_hole": {"all": 0.2, "text": "Via Hole-to-Hole Spacing: 0.2mm"},
+    "pad_hole_to_hole": {"all": 0.45, "text": "Pad Hole-to-Hole Spacing: 0.45mm"},
+    "via_hole_to_track": {"all": 0.2, "text": "Via hole to Track: 0.2mm"},
+    "pth_to_track": {"all": 0.28, "recommended": 0.35, "text": "PTH to track: 0.35mm is recommended, minimum 0.28mm"},
+    "pad_to_track": {"all": 0.1, "bga": 0.09, "text": "Pad to track clearance (1 oz): 0.1 mm; 0.09 mm locally for BGA pads"},
+    "smd_pad_to_pad": {"all": 0.15, "text": "SMD pad to pad clearance (different nets): 0.15mm"},
+    "pth_annular_ring": {"two_layer": 0.18, "two_layer_recommended": 0.25, "multilayer": 0.15, "multilayer_recommended": 0.2, "text": "PTH annular ring: 2-layer recommended 0.25 mm, absolute minimum 0.18 mm; multilayer recommended 0.20 mm, absolute minimum 0.15 mm"},
+    "min_pth_drill": {"all": 0.15, "recommended": 0.5, "text": "PTH hole 0.15 mm (0.1 mm for boards up to 1 mm, costlier); 0.5 mm or more recommended"},
+    "min_npth": {"all": 0.5, "text": "Min. Non-plated holes: 0.50mm"},
+    "copper_to_routed_edge": {"all": 0.2, "text": "Copper clearance from routed board edges: >= 0.2 mm"},
+    "copper_to_vcut_edge": {"all": 0.4, "text": "Copper clearance from V-cut board edges: >= 0.4 mm"},
+    "silkscreen_min_line": {"all": 0.15, "text": "Characters width less than 0.15mm will be unidentifiable"},
+    "silkscreen_min_text_height": {"all": 1.0, "text": "Minimum text height: 40 mil (1.0mm), width to height 1:6"},
+    "soldermask_bridge": {"green": 0.10, "black_white": 0.13, "two_oz": 0.20, "text": "Min. pad spacing for a mask dam: 0.10 mm (green, red, yellow, blue, purple), 0.13 mm (black, white); 2 oz 0.20 mm"}
+  }
+}

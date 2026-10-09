@@ -26,6 +26,7 @@ import uuid
 
 from . import dialogs
 from .builtin import BuiltinClient, BuiltinError
+from .fusion_lock import LOCK, FusionBusy
 
 INFO_PATH = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
                          "fusion-electronics-mcp", "bridge.json")
@@ -68,6 +69,12 @@ class Bridge:
         self.watch_dialogs = watch_dialogs
         self.last_dialogs: list[dict] = []
         self._toasts: dict[int, str] = {}     # toast hwnd -> last text already reported
+        self.lock = LOCK                      # one server process at a time talks to Fusion
+        # DRC before and after every verified write, the reply listing only new errors
+        # (FUSION_MCP_DRC_AFTER_WRITES=0 turns it off); FUSION_MCP_UNDO_ON_NEW_DRC=1 also undoes
+        # a write that adds copper errors
+        self.drc_after_writes = os.environ.get("FUSION_MCP_DRC_AFTER_WRITES", "1") != "0"
+        self.undo_on_new_drc = os.environ.get("FUSION_MCP_UNDO_ON_NEW_DRC", "0") == "1"
 
     def transport(self) -> str:
         mode = os.environ.get("FUSION_MCP_TRANSPORT", "auto").strip().lower()
@@ -103,6 +110,15 @@ class Bridge:
 
     def call(self, op: str, args: dict | None = None, timeout: float = 60.0,
              answers: list[tuple[str, str]] | None = None, forms: list[dict] | None = None) -> dict:
+        """Run one op while holding the lock every server process shares (see fusion_lock)."""
+        try:
+            with self.lock.hold(op):
+                return self._call(op, args, timeout, answers, forms)
+        except FusionBusy as ex:
+            raise BridgeUnavailable(str(ex)) from None
+
+    def _call(self, op: str, args: dict | None = None, timeout: float = 60.0,
+              answers: list[tuple[str, str]] | None = None, forms: list[dict] | None = None) -> dict:
         """Run one add-in op. `answers` lists (regex, button) pairs for message
         boxes the caller expects (e.g. confirming a net merge the user asked
         for); `forms` lists form answers (see dialogs.FORM_*). Any other
@@ -205,6 +221,11 @@ class Bridge:
         if not res.get("ok"):
             err = res.get("error") or {}
             msg = err.get("message", "unknown error")
+            if err.get("code") == "timeout" and "before Fusion started it" in msg:
+                msg += (". Fusion never started this call: it is still busy with an earlier one, loading a "
+                        "design, or showing a dialog (save/discard, sign-in, a newer version). Look at Fusion: "
+                        "close the dialog or press Esc and wait until it responds. Calls will keep failing "
+                        "this way until it does; don't retry in a loop.")
             if self.last_dialogs:
                 msg += " | Fusion showed: " + "; ".join(describe(d) for d in self.last_dialogs)
             raise BridgeOpError(err.get("code", "error"), msg)

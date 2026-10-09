@@ -1,0 +1,33 @@
+{
+  "title": "Reference currents",
+  "note": "What an interface may carry, from the cited documents (read 2026-10-07). The parts on a path (magnetics, connectors, fuses, ferrites) can allow less: record their datasheet ratings with set_part_rating and the sizing uses the weakest. null where no source could be confirmed.",
+  "rows": [
+    {"interface": "PoE Type 1 (IEEE 802.3af), 2-pair", "current_a": 0.35, "per": "pair set (maximum)",
+     "notes": "15.4 W at the PSE over Class D cabling, 13 W at the PD. The two wires of a pair share the pair current; a magnetics centre-tap trace carries all of it.",
+     "source": {"doc": "IEEE 802.3 Working Group liaison to ISO/IEC SC25 WG3, 'IEEE P802.3bt Clause Referencing', approved 25 May 2017", "url": "https://grouper.ieee.org/groups/802/3/minutes/may17/outgoing/IEEE_802d3_to_ISOIEC_SC25_WG3_0517.pdf"}},
+    {"interface": "PoE Type 2 (IEEE 802.3at), 2-pair", "current_a": 0.6, "per": "pair set (maximum)",
+     "notes": "30 W at the PSE over Class D cabling, 25.5 W at the PD.",
+     "source": {"doc": "IEEE 802.3 Working Group liaison to ISO/IEC SC25 WG3, 'IEEE P802.3bt Clause Referencing', approved 25 May 2017", "url": "https://grouper.ieee.org/groups/802/3/minutes/may17/outgoing/IEEE_802d3_to_ISOIEC_SC25_WG3_0517.pdf"}},
+    {"interface": "PoE Type 3 (IEEE 802.3bt), 4-pair", "current_a": 0.6, "per": "pair (nominal)",
+     "notes": "60 W at the PSE, 51 W at the PD. 4-pair figures are nominal to allow for current imbalance between pairs.",
+     "source": {"doc": "IEEE 802.3 Working Group liaison to ISO/IEC SC25 WG3, 'IEEE P802.3bt Clause Referencing', approved 25 May 2017", "url": "https://grouper.ieee.org/groups/802/3/minutes/may17/outgoing/IEEE_802d3_to_ISOIEC_SC25_WG3_0517.pdf"}},
+    {"interface": "PoE Type 4 (IEEE 802.3bt), 4-pair", "current_a": 0.866, "per": "pair (nominal)",
+     "notes": "90 W at the PSE, 71.3 W at the PD (the letter predates the final standard). Siemon reports that the published 802.3bt table uses 0.96 A per pair for Type 4 (from a 100 VA limited power source); size for 0.96 A to be safe.",
+     "source": {"doc": "IEEE 802.3 Working Group liaison (25 May 2017); Siemon, 'De-Mystifying Type 4 PoE Nominal Current Specifications'", "url": "https://grouper.ieee.org/groups/802/3/minutes/may17/outgoing/IEEE_802d3_to_ISOIEC_SC25_WG3_0517.pdf"}},
+    {"interface": "USB 2.0 default (VBUS)", "current_a": 0.5, "per": "port",
+     "notes": "Default Type-C current advertisement for USB 2.0.",
+     "source": {"doc": "TI SLLSEN9F, TUSB320 data sheet rev. F (March 2022), 7.3.2 Type-C Current Mode", "url": "https://www.ti.com/document-viewer/lit/html/SLLSEN9F/GUID-3BF156CA-3E11-436F-8D41-07D491DBA492"}},
+    {"interface": "USB 3.x default (VBUS)", "current_a": 0.9, "per": "port",
+     "notes": "Default Type-C current advertisement for USB 3.1 (SuperSpeed); 500 mA when the device has not enumerated as SuperSpeed.",
+     "source": {"doc": "TI SLLSEN9F, TUSB320 data sheet rev. F (March 2022), 7.3.2 Type-C Current Mode", "url": "https://www.ti.com/document-viewer/lit/html/SLLSEN9F/GUID-3BF156CA-3E11-436F-8D41-07D491DBA492"}},
+    {"interface": "USB Type-C 1.5 A (medium current)", "current_a": 1.5, "per": "port",
+     "notes": "Type-C Current at 5 V, advertised without USB Power Delivery.",
+     "source": {"doc": "TI SLLSEN9F, TUSB320 data sheet rev. F (March 2022), 7.3.2 Type-C Current Mode", "url": "https://www.ti.com/document-viewer/lit/html/SLLSEN9F/GUID-3BF156CA-3E11-436F-8D41-07D491DBA492"}},
+    {"interface": "USB Type-C 3.0 A (high current)", "current_a": 3.0, "per": "port",
+     "notes": "Type-C Current at 5 V, advertised without USB Power Delivery.",
+     "source": {"doc": "TI SLLSEN9F, TUSB320 data sheet rev. F (March 2022), 7.3.2 Type-C Current Mode", "url": "https://www.ti.com/document-viewer/lit/html/SLLSEN9F/GUID-3BF156CA-3E11-436F-8D41-07D491DBA492"}},
+    {"interface": "USB Power Delivery (3 A, 5 A with an e-marked cable)", "current_a": null, "per": "port",
+     "notes": "Not confirmed from a primary source yet; check the USB PD specification.",
+     "source": null}
+  ]
+}

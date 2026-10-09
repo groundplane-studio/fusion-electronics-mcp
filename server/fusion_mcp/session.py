@@ -15,9 +15,11 @@ from dataclasses import dataclass
 from typing import Callable
 
 from fusion_offline import design as D
+from fusion_offline import drc as DRC
 from fusion_offline import eagle
 
 from .bridge import Bridge, BridgeOpError, describe
+from .fusion_lock import FusionBusy
 
 
 class WriteFailed(Exception):
@@ -42,6 +44,8 @@ class Snapshot:
 class Session:
     def __init__(self, bridge: Bridge | None = None):
         self.bridge = bridge or Bridge()
+        self._drc_cache: tuple[int, list] | None = None     # (hash of the board export, its DRC errors)
+        self.last_drc: dict | None = None
 
     # -- primitives ----------------------------------------------------------
     def context(self) -> dict:
@@ -76,8 +80,28 @@ class Session:
                     raise
         return snap
 
+    def active_design(self) -> str | None:
+        return ((self.context() or {}).get("active_document") or {}).get("name")
+
+    def require_design(self, design: str | None) -> str | None:
+        """Fusion's active design name; WriteFailed if `design` is given and is not it.
+        Another session (or the person) can switch Fusion to another design between calls,
+        and part names like R1 exist on most boards, so a write must name its target."""
+        name = self.active_design()
+        if design and (name or "").strip().casefold() != design.strip().casefold():
+            raise WriteFailed(f"Fusion's active design is {name!r}, not {design!r}: nothing was written. "
+                              "Switch Fusion back to that design (or check which design you meant) and run "
+                              "the call again.")
+        return name
+
     def errors(self, kind: str) -> dict:
         return self.bridge.call("errors", {"kind": kind})
+
+    def drc_errors(self) -> list[dict]:
+        """Run Fusion's DRC on the board and return its errors (DRC is never grouped into an undo
+        step; its window is not a question, so dialogs are not treated as failures)."""
+        self.run("DRC;", "board", check_dialogs=False)
+        return self.errors("board").get("errors", [])
 
     @staticmethod
     def with_grid(commands: str) -> str:
@@ -119,15 +143,42 @@ class Session:
                        verify: Callable[[Snapshot, Snapshot], tuple[bool, str]],
                        board: bool = True, schematic: bool = True,
                        answers: list[tuple[str, str]] | None = None,
-                       forms: list[dict] | None = None, timeout: float = 60.0) -> tuple[Snapshot, str]:
+                       forms: list[dict] | None = None, timeout: float = 60.0,
+                       design: str | None = None) -> tuple[Snapshot, str]:
         """Run `commands` in `editor` (the add-in groups them into ONE undo
         step), then check verify(before, after). Returns (after, detail).
 
+        design: refuse unless this is Fusion's active design, checked after the
+        "before" export and immediately before anything is sent.
         On failure the change is undone, but only if the design actually
         changed: an UNDO after a no-op would revert the previous tool call.
         Dialogs Fusion raised (and how they were answered) are included in
-        the error so the agent learns why."""
+        the error so the agent learns why.
+        The whole sequence (export, write, read-back, undo) holds the lock all
+        server processes share, so another session cannot act on Fusion in between."""
+        lock = getattr(self.bridge, "lock", None)
+        try:
+            with (lock.hold("write") if lock else contextlib.nullcontext()):
+                return self._verified_write(editor, commands, verify, board, schematic, answers, forms,
+                                            timeout, design)
+        except FusionBusy as ex:
+            raise WriteFailed(f"{ex} Nothing was written.") from None
+
+    def _verified_write(self, editor, commands, verify, board, schematic, answers, forms, timeout, design):
         before = self.snapshot(board, schematic)
+        if design:
+            self.require_design(design)
+        # DRC before and after (bridge.drc_after_writes): the reply says what the write broke
+        drc_before, drc_note = None, ""
+        if board and before.board_xml is not None and getattr(self.bridge, "drc_after_writes", False):
+            h = hash(before.board_xml)
+            try:
+                drc_before = (self._drc_cache[1] if self._drc_cache and self._drc_cache[0] == h
+                              else self.drc_errors())
+            except Exception as ex:                           # never let DRC block a write
+                drc_note = f"; DRC not run ({ex})"
+            if design:
+                self.require_design(design)                   # DRC took a moment: check again
         pre, commands, post = split_settings(commands)
         if pre:                                   # editor settings (e.g. SET WIRE_BEND) cannot be grouped:
             self.run(pre, editor, timeout=30)     # sent on their own, so the write stays ONE undo step
@@ -145,8 +196,20 @@ class Session:
         note = ("; Fusion showed " + "; ".join(describe(d) for d in shown)) if shown else ""
         if messages:
             note += "; Fusion said: " + " | ".join(messages)
+        if ok and not unexpected and drc_before is not None:
+            try:
+                errs = self.drc_errors()
+                d = DRC.diff(drc_before, errs)
+                self._drc_cache = (hash(after.board_xml), errs) if after.board_xml is not None else None
+                self.last_drc = d
+                drc_note = "; " + DRC.line(d)
+                if d["new_copper"] and getattr(self.bridge, "undo_on_new_drc", False):
+                    ok, detail = False, f"{detail}; the write added {d['new_copper']} copper DRC error(s) ({DRC.line(d)})"
+            except Exception as ex:
+                drc_note = f"; DRC not run after the write ({ex})"
         if ok and not unexpected:
-            return after, detail + note
+            return after, detail + drc_note + note
+        self._drc_cache = None
         changed = after.board_xml != before.board_xml or after.sch_xml != before.sch_xml
         if changed:
             self.undo(editor)

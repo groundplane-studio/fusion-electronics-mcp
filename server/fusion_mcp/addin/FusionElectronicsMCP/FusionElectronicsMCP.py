@@ -34,7 +34,7 @@ import uuid
 import adsk.core  # type: ignore
 import adsk.electron  # type: ignore
 
-ADDIN_VERSION = "0.13.0"
+ADDIN_VERSION = "0.14.0"
 PROTOCOL = 1
 EVENT_ID = "fusion_electronics_mcp_bridge"
 DEFAULT_TIMEOUT = 60.0
@@ -535,15 +535,31 @@ def op_find_documents(args):
 
 
 def op_open_design(args):
+    """Bring a design (or library) forward, opening it from the project only when none of its
+    documents is open. Fusion froze on 2026-10-07 during open_design while another design had
+    unsaved changes; re-opening a file that is already open (only its board or schematic tab,
+    without the design overview) can raise a modal prompt that blocks Fusion's main thread.
+    So: any open document of the design counts as open and is activated, and opening from the
+    project is refused while an open Electronics document has unsaved changes, unless
+    allow_unsaved is set."""
     name = args.get("name")
     folder = args.get("folder")
     ext = "flbr" if args.get("kind") == "library" else "fprj"
-    # already open: just bring it forward, no project listing at all
-    already = [d for d in _docs() if d.name == name and _kind_of(d) == ("library" if ext == "flbr" else "design")]
-    if already:
-        with contextlib.suppress(Exception):
-            already[0].activate()
-        return op_context({})
+    kinds = ("library",) if ext == "flbr" else ("design", "board", "schematic")
+    mine = sorted((d for d in _docs() if d.name == name and _kind_of(d) in kinds),
+                  key=lambda d: kinds.index(_kind_of(d)))
+    if mine:                                   # already open: bring it forward, never open it again
+        if not mine[0].isActive:
+            mine[0].activate()
+            _settle(20)
+        res = op_context({})
+        res["already_open"] = True
+        return res
+    unsaved = sorted({d.name for d in _docs() if _kind_of(d) != "other" and d.isModified})
+    if unsaved and not args.get("allow_unsaved"):
+        raise BridgeError("unsaved", f"{', '.join(repr(u) for u in unsaved)} has unsaved changes. Opening another "
+                          "design from the project while one has unsaved changes froze Fusion once; save it "
+                          "first (save_design), open the design in Fusion by hand, or pass allow_unsaved=true.")
     proj, found = _project_designs(folder=folder, project=args.get("project"))
     cand = [(p, f) for p, f in found if f.name == name and f.fileExtension == ext]
     if not cand:

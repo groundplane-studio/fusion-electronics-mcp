@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased (0.3.0)
+
+From laying out the PoE Magnetics Test Board (RJ45, magnetics, CM4) in
+October 2026. Every write stays verified and one undo step; new write tools
+take `design=` and refuse when Fusion's active design is another one.
+
+### Placement
+- `render_board(courtyards, silkscreen, pad_numbers)`: courtyards with
+  overlaps filled red and touching pairs orange (touching is not a
+  violation); module outlines that hold several parts are skipped.
+- `check_placement`: courtyard overlaps, pad gaps against the rules,
+  silkscreen on a neighbour's pads, series parts off their pad's row, and
+  tidiness (off grid, almost aligned, mixed rotation, uneven pitch).
+- `move_parts`: a batch of moves and rotations in one undo step, undone as a
+  whole if any part lands elsewhere or a neighbour is pushed; `dry_run`
+  pictures and a report of what the moves introduce or clear. `move_part` and
+  `rotate_part` take `dry_run` and now return that report.
+- `place_inline`: series parts in one column (or row) on the rows of the pads
+  they connect to.
+- `tidy_placement`: grid, rows and even pitch for parts that do not matter
+  electrically; pair parts move only as one group, net-class parts,
+  decoupling caps, crystals and isolation bridges are only nudged; nothing
+  moves for silkscreen; rework gaps never shrink.
+
+### Net classes and design rules
+- `list_net_classes`, `set_net_class` (writes a rule file to load; never the
+  CLASS command), `assign_net_class` (picks nets on schematic wires).
+  Values come from each class's design rules first; warns about rules on all
+  copper and width rules wider than the class's pads.
+- `get_design_rules` reports teardrops, the pair rule and built-in
+  clearances; `edit_design_rules` writes a rule file with changes.
+- `jlc_limits`: JLCPCB's published limits, cited and dated.
+
+### Routing and DRC
+- `route_pair`: coupled via-pair layer changes, vias in heads, tuning on any
+  layer, arcs in the centreline, meander style and settings, JLC same-net
+  spacing, clearances DRC enforces (class clearances, margin), squeezes
+  explained and `neck_down`, coupled detours to lengthen both traces
+  (`add_length_mm`) and `group=` targets.
+- DRC before and after every write: the reply lists only new errors
+  (`FUSION_MCP_DRC_AFTER_WRITES`, `FUSION_MCP_UNDO_ON_NEW_DRC`); `check_drc`
+  summarises and diffs.
+- Length groups (`set_length_group`, `check_length_groups`) with paths
+  through series parts; `length_tolerances`, a cited table of typical
+  tolerances.
+- Current: `set_net_current`, `size_for_current` (IPC-2221 per layer from the
+  real copper), `check_current`, `current_ratings` and `set_part_rating`
+  (sizing capped by the weakest part); `route_trace` / `route_net` size from
+  a net's current when no width is given.
+
+### Schematic
+- `straighten_labels` and `match_labels` for part labels.
+- `review_schematic`: supply symbols on other nets, overbar markup;
+  `list_nets` / `get_net` show overbar names readably.
+
+### Reliability
+- One server process at a time talks to Fusion (a lock shared by all
+  sessions' servers; `FUSION_MCP_LOCK_WAIT_S`).
+- Replies say when the running server is older than the code on disk.
+- Command numbers are exact to 0.1 um (they kept only 6 significant digits).
+- Lengths from `list_nets`, `get_net` and `check_length_match` no longer
+  count air wires.
+
+
 ## 0.2.0 (2026-10-04)
 
 First public release.

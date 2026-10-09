@@ -14,13 +14,23 @@ Things this transport has to handle (the add-in does not):
 - when the PERSON is in the middle of a command, writes are refused with
   "Cannot perform 'script' while a command dialog is open": reported as
   fusion_busy, never cancelled on their behalf. Reads run as read-only
-  scripts, which Autodesk allows mid-command.
+  scripts, which Autodesk allows mid-command;
+- before each script Autodesk's runner wraps sys.stdout/sys.stderr in a fresh
+  _NsSanitizedWriter (whose __getattr__ forwards to self._original) and does
+  not always unwrap it, notably when scripts overlap. The wrappers nest, one
+  per leaked run, until a single attribute lookup on stdout recurses a few
+  hundred levels deep and overflows Fusion's 1 MB main-thread stack
+  (RecursionError at "<string>", line 25, in __getattr__). From then on every
+  print fails, so no script can return a result until Fusion restarts. Each
+  script therefore starts by collapsing the chain (STREAM_REPAIR), and calls
+  are serialised so they never overlap.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -34,6 +44,35 @@ MARK = "@@FEMCP@@"
 # the person is in the middle of a command)
 READ_ONLY_OPS = {"ping", "context", "export", "design_rules", "layers", "pours", "list_designs", "errors", "elements3d", "lib_device3d", "pcb3d_bodies"}
 _BUSY = "while a command dialog is open"
+_NO_SESSION = "not initialized"      # Fusion forgot our MCP session: initialize again
+
+# Runs first in every script, before anything prints. Collapses stacked
+# _NsSanitizedWriter layers (one per leaked run; each run defines a new class,
+# so match by name) so the outermost wrapper writes straight to the first real
+# stream. A layer without _original would make its __getattr__ recurse
+# forever, so it is pointed at the interpreter's own stream instead.
+STREAM_REPAIR = '''
+def _femcp_repair_streams(_sys):
+    for _name in ("stdout", "stderr"):
+        _top = getattr(_sys, _name, None)
+        if type(_top).__name__ != "_NsSanitizedWriter":
+            continue
+        _cur, _depth = _top, 0
+        while type(_cur).__name__ == "_NsSanitizedWriter" and _depth < 100000:
+            _nxt = vars(_cur).get("_original")
+            if _nxt is None:
+                _nxt = getattr(_sys, "__" + _name + "__", None)
+                if _nxt is None:
+                    import io
+                    _nxt = io.StringIO()
+            _cur, _depth = _nxt, _depth + 1
+        if _depth > 1 or vars(_top).get("_original") is not _cur:
+            vars(_top)["_original"] = _cur
+
+
+import sys as _femcp_sys
+_femcp_repair_streams(_femcp_sys)
+'''
 
 
 class BuiltinError(Exception):
@@ -66,7 +105,7 @@ def _literal(text: str, width: int = 1000) -> str:
 
 def build_script(op: str, args: dict, read_only: bool) -> str:
     end = "" if read_only else "\n    _ui.terminateActiveCommand()   # an EAGLE command leaves its tool active"
-    return _ops_source() + f'''
+    return STREAM_REPAIR + _ops_source() + f'''
 
 _ARGS = {_literal(json.dumps(args))}
 
@@ -91,6 +130,9 @@ class BuiltinClient:
         self.session: str | None = None
         self._id = 0
         self._checked: tuple[float, bool] | None = None
+        # one script at a time: overlapping runs are what leak Fusion's stdout
+        # wrappers, and _initialize must not swap the session mid-call
+        self._lock = threading.Lock()
 
     def _post(self, body: dict, timeout: float) -> tuple[str | None, dict | None]:
         headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -124,16 +166,33 @@ class BuiltinClient:
         now = time.monotonic()
         if self._checked and now - self._checked[0] < 30:
             return self._checked[1]
+        if not self._lock.acquire(blocking=False):
+            return True                      # a call is in flight, so the server answered
         try:
             self._initialize(timeout=1.5)
             ok = True
         except (OSError, urllib.error.URLError, ValueError):
             ok = False
+        finally:
+            self._lock.release()
         self._checked = (now, ok)
         return ok
 
     def call(self, op: str, args: dict, timeout: float) -> dict:
         """Run one add-in operation; returns the add-in's {'ok', 'result' | 'error'}."""
+        if not self._lock.acquire(timeout=timeout):
+            raise BuiltinError("fusion_busy", f"a previous operation was still running in Fusion after {timeout:.0f}s; "
+                               "retry once it finishes")
+        try:
+            return self._call(op, args, timeout)
+        except Exception:
+            # whatever went wrong, start the next call with a fresh MCP session
+            self.session, self._checked = None, None
+            raise
+        finally:
+            self._lock.release()
+
+    def _call(self, op: str, args: dict, timeout: float) -> dict:
         read_only = op in READ_ONLY_OPS
         script = build_script(op, args or {}, read_only)
         obj = {"script": script}
@@ -147,12 +206,15 @@ class BuiltinClient:
                     "params": {"name": "fusion_mcp_execute", "arguments": {"featureType": "script", "object": obj}}}
             try:
                 _, resp = self._post(body, timeout)
-                break
             except urllib.error.HTTPError as ex:
                 if ex.code in (400, 404) and attempt == 1:   # session expired (Fusion restarted)
                     self.session = None
                     continue
                 raise
+            if attempt == 1 and _NO_SESSION in json.dumps(resp or {}):
+                self.session = None                          # "Session not initialized. Call 'initialize' first."
+                continue
+            break
         if resp is None or "error" in resp and "result" not in resp:
             raise BuiltinError("bridge_error", f"Fusion's MCP server returned {resp!r}"[:500])
         content = resp["result"].get("content") or [{}]
@@ -165,6 +227,11 @@ class BuiltinClient:
             if _BUSY in err:
                 raise BuiltinError("fusion_busy", "Fusion is in the middle of a command (a tool or command dialog "
                                    "is active). Finish or cancel it in Fusion, then retry.")
+            if "RecursionError" in err and "__getattr__" in err:
+                raise BuiltinError("fusion_stdout_corrupt", "Fusion's script output streams are nested too deep "
+                                   "(Autodesk MCP server stdout wrappers leaked by earlier scripts) and this script "
+                                   "overflowed the stack before it could repair them. Retry once; if it persists, "
+                                   "restart Fusion or use FUSION_MCP_TRANSPORT=addin. Detail: " + err[-300:])
             raise BuiltinError("fusion_error", err[-1500:])
         msg = inner.get("message") or ""
         i = msg.rfind(MARK)
