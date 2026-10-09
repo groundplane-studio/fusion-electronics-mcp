@@ -34,13 +34,15 @@ import uuid
 import adsk.core  # type: ignore
 import adsk.electron  # type: ignore
 
-ADDIN_VERSION = "0.14.2"
+ADDIN_VERSION = "0.14.3"
 PROTOCOL = 1
 EVENT_ID = "fusion_electronics_mcp_bridge"
 DEFAULT_TIMEOUT = 60.0
 INFO_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "fusion-electronics-mcp")
 INFO_PATH = os.path.join(INFO_DIR, "bridge.json")
 WORK_DIR = os.path.join(tempfile.gettempdir(), "fusion-electronics-mcp")
+# where each design was last found, so open_design by name alone goes straight to its folder
+FOLDERS_PATH = os.path.join(INFO_DIR, "design_folders.json")
 U_PER_MM = 320000.0
 
 # EAGLE command verbs allowed through `run` / `run_script`.
@@ -556,6 +558,43 @@ def _norm_folder(path):
     return "/".join(p for p in str(path or "").replace("\\", "/").split("/") if p)
 
 
+def _folders():
+    try:
+        with open(FOLDERS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_folder(project, name, ext, folder):
+    """Note the folder a design was found in (best effort: never fails the call)."""
+    if folder is None or not project or not name:
+        return
+    data = _folders()
+    key = f"{project}|{ext}|{name}"
+    if data.get(key) == folder:
+        return
+    data[key] = folder
+    with contextlib.suppress(OSError):
+        os.makedirs(INFO_DIR, exist_ok=True)
+        tmp = FOLDERS_PATH + f".{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1, sort_keys=True)
+        os.replace(tmp, FOLDERS_PATH)
+
+
+def _known_folders(project):
+    return sorted({v for k, v in _folders().items() if k.startswith(f"{project}|")})
+
+
+def _doc_project(d):
+    try:
+        return d.dataFile.parentProject.name
+    except Exception:
+        return None
+
+
 def _doc_folder(d):
     """A document's folder in its project as 'A/B' ('' for the top folder), or None when Fusion
     does not say (an unsaved document, or one without a data file)."""
@@ -602,6 +641,7 @@ def op_open_design(args):
                               + ", ".join(repr(f or "top folder") for f in known)
                               + "); pass folder= to say which one")
     if mine:                                   # already open: bring it forward, never open it again
+        _remember_folder(_doc_project(mine[0]), name, ext, _doc_folder(mine[0]))
         if not mine[0].isActive:
             mine[0].activate()
             _settle(20)
@@ -613,12 +653,35 @@ def op_open_design(args):
         raise BridgeError("unsaved", f"{', '.join(repr(u) for u in unsaved)} has unsaved changes. Opening another "
                           "design from the project while one has unsaved changes froze Fusion once; save it "
                           "first (save_design), open the design in Fusion by hand, or pass allow_unsaved=true.")
-    proj, found = _project_designs(folder=folder, project=args.get("project"))
-    cand = [(p, f) for p, f in found if f.name == name and f.fileExtension == ext]
+    try:
+        project = _app.data.activeProject.name
+    except Exception:
+        project = None
+    cand = []
+    if folder is None:                         # name only: try the folder it was found in last time
+        last = _folders().get(f"{project}|{ext}|{name}")
+        if last is not None:
+            with contextlib.suppress(BridgeError):
+                _, found = _project_designs(folder=last, project=args.get("project"))
+                cand = [(p, f) for p, f in found if f.name == name and f.fileExtension == ext]
     if not cand:
+        try:
+            proj, found = _project_designs(folder=folder, project=args.get("project"))
+        except BridgeError as ex:
+            known = _known_folders(project)
+            if folder is None and known and ex.code in ("timeout", "not_found"):
+                raise BridgeError(ex.code, f"{ex}. Pass folder=; designs have been found in "
+                                  + ", ".join(repr(k or "top folder") for k in known)) from None
+            raise
+        cand = [(p, f) for p, f in found if f.name == name and f.fileExtension == ext]
+    if not cand:
+        known = [k for k in _known_folders(project) if k != _norm_folder(folder)]
         raise BridgeError("not_found", f"no {'library' if ext == 'flbr' else 'design'} {name!r} in "
-                          f"{folder or 'the top folder'} of the active project {proj.name!r}; pass folder= "
-                          "(it is not searched recursively), or open it in Fusion by hand")
+                          f"{folder or 'the top folder'} of the active project {project!r}; pass folder= "
+                          "(it is not searched recursively), or open it in Fusion by hand"
+                          + (f". Designs have been found in {', '.join(repr(k or 'top folder') for k in known)}"
+                             if known else ""))
+    _remember_folder(project, name, ext, cand[0][0])
     _app.documents.open(cand[0][1])
     _settle(40)
     return op_context({})

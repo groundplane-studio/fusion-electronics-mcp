@@ -109,7 +109,9 @@ def open_design(name: str, folder: str | None = None, allow_unsaved: bool = Fals
     """Make a design (schematic + board) current. If any of its documents is already open,
     Fusion just switches to it (already_open=true). Otherwise it is opened from the active
     project, which is refused while an open design has unsaved changes (that once froze
-    Fusion): save first, or pass allow_unsaved=true to open it anyway. Switching designs
+    Fusion): save first, or pass allow_unsaved=true to open it anyway. Projects are never
+    searched recursively: pass folder= ('Boards/Rock'); by name alone the folder it was last
+    found or seen open in is tried first, then the project's top folder. Switching designs
     affects every Claude session using Fusion."""
     return session.bridge.call("open_design", {"name": name, "folder": folder, "allow_unsaved": allow_unsaved},
                                timeout=180)

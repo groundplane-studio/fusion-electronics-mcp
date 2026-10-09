@@ -97,8 +97,11 @@ take `design=` and refuse when Fusion's active design is another one.
 - Fusion's built-in server: a write is never re-run because its own output contained "not
   initialized"; the whole chain of stdout wrappers is repaired.
 - `open_design` matches the folder as well as the name of an already-open design.
+- `open_design` by name alone tries the folder the design was last found or seen open in before
+  the project's top folder (listing a big project's top folder can time out), and when it does
+  time out it names the folders it knows (add-in 0.14.3).
 - Hardening: rule files are written only to the rules folder, the temp folder, Downloads or
-  Documents; the add-in allows AUTO SAVE / LOAD only for files in the temp folder (add-in 0.14.2);
+  Documents; the add-in allows AUTO SAVE / LOAD only for files in the temp folder ;
   previews go to the per-user data folder; the autorouter's temp folder is removed after a run;
   part ratings are saved atomically under the shared lock.
 
