@@ -290,6 +290,21 @@ development team: industrial design, electronics, firmware and manufacturing,
 from concept to production. Want a board designed, reviewed or brought to
 production? [Get in touch](https://groundplanestudio.com/contact).
 
+## Disclosure
+
+- **Not affiliated with Autodesk.** Autodesk, Fusion and EAGLE are trademarks of
+  Autodesk, Inc. This is an independent project, not made, endorsed or supported
+  by Autodesk. The same goes for JLCPCB and EasyEDA.
+- **Built with AI.** Most of the code was written with Claude Code, directed,
+  reviewed and tested on real boards by the engineers at Ground Plane Studio. The
+  tools that edit a design check the result and undo the change when it does not
+  match, and there is a large automated test suite, but treat it like any tool
+  you did not write yourself.
+- **No warranty.** It is provided as is (see `LICENSE`). An agent can get a design
+  wrong. Check every board yourself (DRC, ERC, your fab's previews) before you
+  order, keep your designs versioned, and remember that what you send to
+  fabrication is your call.
+
 ## License
 
 MIT. See `LICENSE`.
