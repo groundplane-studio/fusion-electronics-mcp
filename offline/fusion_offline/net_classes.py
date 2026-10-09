@@ -26,14 +26,19 @@ RULE_TYPES = {"width": ("Minimum Copper Width", "Copper Width"),
               "clearance": ("Copper Clearance", "Copper Clearance")}
 
 
+_UNIT_MM = {"": 1.0, "mm": 1.0, "mil": 0.0254, "in": 25.4, "inch": 25.4, "um": 0.001, "mic": 0.001}
+
+
 def _mm(v: str | None) -> float | None:
-    if not v:
+    """A length from a rule file ("0.2mm", ".2mm", "6mil", "0.01in", "150um"; a bare number is mm)
+    in mm. None for an empty value; ValueError for anything else that is not a length."""
+    if v is None or not str(v).strip():
         return None
-    m = re.match(r"\s*(-?\d+(?:\.\d+)?)\s*([a-z]*)", v)
-    if not m:
-        return None
-    x, unit = float(m.group(1)), m.group(2)
-    return round(x * 0.0254, 4) if unit == "mil" else x
+    m = re.fullmatch(r"\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*([A-Za-z]*)\s*", str(v))
+    unit = m.group(2).lower() if m else None
+    if not m or unit not in _UNIT_MM:
+        raise ValueError(f"cannot read {v!r} as a length (expected a number with mm, mil, in or um)")
+    return round(float(m.group(1)) * _UNIT_MM[unit], 6)
 
 
 def _class_numbers(scope: str | None) -> list[str]:
@@ -276,9 +281,11 @@ def pick_points(sch_root: ET.Element, nets: list[str], clear_mm: float = 0.05) -
 
 def change_class_commands(class_name: str, points: dict) -> str:
     """EDIT .s<sheet>; CHANGE CLASS <name> (x y) ...; per sheet (verified by hand on 2705.1.25
-    with an unquoted name; names with other characters are quoted)."""
-    nm = class_name if re.fullmatch(r"\w+", class_name) else "'" + class_name.replace("'", "") + "'"
+    with an unquoted name; names with other characters are quoted, and a name with a quote or
+    semicolon is refused). Coordinates to 0.1 um (commands.n, not :g)."""
+    from fusion_mcp import commands as C          # the command rules live with the server
+    nm = class_name if re.fullmatch(r"\w+", class_name or "") else C.q(class_name)
     by_sheet = {}
     for net, (sheet, x, y) in sorted(points.items()):
-        by_sheet.setdefault(sheet, []).append(f"({x:g} {y:g})")
+        by_sheet.setdefault(sheet, []).append(C.pt(x, y))
     return " ".join(f"EDIT .s{s}; CHANGE CLASS {nm} {' '.join(pts)};" for s, pts in sorted(by_sheet.items()))

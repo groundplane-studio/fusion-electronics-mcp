@@ -312,8 +312,10 @@ def check_drc(compare: bool = True, top: int = 5) -> dict:
     design: new errors by type with up to `top` locations each, and how many were fixed or are
     unchanged. Writes report their own new errors (DRC before and after each verified write)."""
     from fusion_offline import drc as DRC
-    active = session.active_design()
-    errs = session.drc_errors()
+    lock = getattr(session.bridge, "lock", None)
+    with (lock.hold("check_drc") if lock else contextlib.nullcontext()):   # DRC and its errors in one hold
+        active = session.active_design()
+        errs = session.drc_errors()
     out = {"design": active, **DRC.summarize(errs)}
     prev = _DRC_LAST.get(active or "")
     if compare and prev is not None:
@@ -359,18 +361,25 @@ def list_diff_pairs(max_skew_mm: float | None = None) -> list[dict]:
 
 @tool(READ)
 def check_length_match(nets: list[str], tolerance_mm: float) -> dict:
-    """Compare routed lengths of a group of nets (e.g. a bus or lanes) against the longest."""
-    b = _snap(schematic=False).board()
+    """Compare routed lengths of a group of nets (e.g. a bus or lanes) against the longest. A
+    length is the net's copper (not air wires) plus each via's barrel between the layers it joins
+    (via_mm; depths from the design's stackup, see via_depths_from)."""
+    from fusion_offline import length_groups as LG
+    snap = _snap(schematic=False)
+    b = snap.board()
     missing = [n for n in nets if n not in b.signals]
     if missing:
         raise KeyError(f"not on the board: {', '.join(missing)}")
-    lens = {n: round(sum(w.length for w in b.signals[n].wires if w.layer != 19), 3) for n in nets}  # copper, not air wires
+    root = D.read_xml(snap.board_xml)
+    depths, src = _layer_depths(root)
+    vias = {n: round(sum(v["barrel_mm"] for v in LG.via_barrels(root, n, depths, b)), 3) for n in nets}
+    lens = {n: round(sum(w.length for w in b.signals[n].wires if w.layer != 19) + vias[n], 3) for n in nets}
     unrouted = [n for n in nets if any(w.layer == 19 for w in b.signals[n].wires)]
     ref = max(lens.values())
-    rows = [{"net": n, "length_mm": L, "short_by_mm": round(ref - L, 3), "ok": ref - L <= tolerance_mm}
-            for n, L in lens.items()]
+    rows = [{"net": n, "length_mm": L, "via_mm": vias[n], "short_by_mm": round(ref - L, 3),
+             "ok": ref - L <= tolerance_mm} for n, L in lens.items()]
     return {"reference_mm": ref, "tolerance_mm": tolerance_mm, "all_ok": all(r["ok"] for r in rows) and not unrouted,
-            "unrouted": unrouted, "nets": rows}
+            "unrouted": unrouted, "via_depths_from": src, "nets": rows}
 
 
 def _tolerance_rows(query: str | None = None) -> list[dict]:
@@ -379,8 +388,30 @@ def _tolerance_rows(query: str | None = None) -> list[dict]:
         rows = _json.load(f)["rows"]
     if not query:
         return rows
-    q = query.casefold()
-    return [r for r in rows if q in r["interface"].casefold()]
+    q = query.casefold().strip()
+    # best tier wins: the whole name (or one of a list row's comma-separated names), a name that
+    # starts with the query as a word, the query as a word anywhere, then any substring. "DDR4"
+    # is the DDR4 row, not LPDDR4; "HDMI" is HDMI 1.4/2.0, not the list row naming HDMI 2.1.
+    word = re.compile(r"(?<![0-9a-z])" + re.escape(q) + r"(?![0-9a-z])")
+    full = lambda r: r["interface"].casefold()
+    for hit in (lambda r: q == full(r) or q in [n.strip() for n in full(r).split(",")],
+                lambda r: bool(word.match(full(r))), lambda r: bool(word.search(full(r))), lambda r: q in full(r)):
+        found = [r for r in rows if hit(r)]
+        if found:
+            return found
+    return []
+
+
+def _layer_depths(root) -> tuple[dict, str]:
+    """Copper layer depths for via barrel lengths: the open design's V2 stackup when readable,
+    else length_groups.layer_depths' fallback (the source says which)."""
+    from fusion_offline import length_groups as LG, stackup as ST
+    try:
+        xml, _ = _v2_rules()
+        st = ST.parse_stackup(xml) if xml else None
+    except Exception:                                      # no bridge or no rules: fall back, say so
+        st = None
+    return LG.layer_depths(root, st)
 
 
 @tool(READ)
@@ -389,7 +420,8 @@ def length_tolerances(interface: str | None = None) -> dict:
     PCIe, SATA, HDMI, MIPI CSI-2, DDR4, LPDDR4, ...): within a pair and between pairs/lanes, the
     impedance, notes, and the vendor document, table and URL each value was read from. A field is
     null where no source could be confirmed. Typical starting points only: the SoC/PHY design
-    guide for your part wins. interface filters by name (e.g. "1000BASE-T", "DDR4")."""
+    guide for your part wins. interface filters by name (e.g. "1000BASE-T", "DDR4"): an exact name
+    first, then a name starting with it as a word, then the word anywhere, then any substring."""
     import json as _json
     with open(os.path.join(os.path.dirname(__file__), "data", "length_tolerances.json"), encoding="utf-8") as f:
         table = _json.load(f)
@@ -449,11 +481,9 @@ def set_length_group(name: str, members: list, intra_tol_mm: float | None = None
     if missing:
         raise ValueError(f"not on the board: {', '.join(missing)}")
     dname, _ = _groups_of(design)
-    data = design_store.load(dname)
-    data.setdefault("length_groups", {})[name] = {
-        "name": name, "members": clean, "intra_tol_mm": intra_tol_mm, "inter_tol_mm": inter_tol_mm,
-        "target": target, "measure": measure, "follow_series": follow_series}
-    where = design_store.save(dname, data)
+    entry = {"name": name, "members": clean, "intra_tol_mm": intra_tol_mm, "inter_tol_mm": inter_tol_mm,
+             "target": target, "measure": measure, "follow_series": follow_series}
+    data, where = design_store.update(dname, lambda d: d.setdefault("length_groups", {}).__setitem__(name, entry))
     out = {"design": dname, "group": data["length_groups"][name], "saved_to": where}
     if used:
         out["preset"] = {"interface": used["interface"], "source": used["source"], "notes": used["notes"]}
@@ -477,9 +507,7 @@ def delete_length_group(name: str, design: str | None = None) -> dict:
     dname, groups = _groups_of(design)
     if name not in groups:
         raise ValueError(f"no length group {name!r} for {dname!r}; groups: {', '.join(groups) or 'none'}")
-    data = design_store.load(dname)
-    data["length_groups"].pop(name)
-    design_store.save(dname, data)
+    data, _ = design_store.update(dname, lambda d: d.setdefault("length_groups", {}).pop(name, None))
     return {"design": dname, "deleted": name, "left": sorted(data["length_groups"])}
 
 
@@ -506,20 +534,21 @@ def set_net_current(currents: dict[str, float], delta_t_c: float = 10.0, design:
     is given. A current of 0 removes the net."""
     from . import design_store
     dname, _ = _currents(design)
-    data = design_store.load(dname)
-    store = data.setdefault("net_currents", {})
     root = D.read_xml(_snap(schematic=False).board_xml)
     sigs = {sg.get("name") for sg in root.iterfind("./drawing/board/signals/signal")}
     missing = [n for n in currents if n not in sigs]
     if missing:
         raise ValueError(f"not on the board: {', '.join(missing)}")
-    for net, amps in currents.items():
-        if float(amps) <= 0:
-            store.pop(net, None)
-        else:
-            store[net] = {"a": float(amps), "delta_t_c": float(delta_t_c)}
-    design_store.save(dname, data)
-    return {"design": dname, "net_currents": store}
+
+    def change(data):
+        store = data.setdefault("net_currents", {})
+        for net, amps in currents.items():
+            if float(amps) <= 0:
+                store.pop(net, None)
+            else:
+                store[net] = {"a": float(amps), "delta_t_c": float(delta_t_c)}
+    data, _ = design_store.update(dname, change)
+    return {"design": dname, "net_currents": data["net_currents"]}
 
 
 @tool(READ)
@@ -539,8 +568,10 @@ def current_ratings(interface: str | None = None) -> dict:
 def set_part_rating(part_number: str, current_a: float, source: str, note: str | None = None) -> dict:
     """Record a part's current rating from its datasheet (part number or value as on the board's
     parts, the rating in A, and the datasheet link or document), kept for all designs.
-    size_for_current and check_current then cap a net's current at the weakest rated part on it:
-    e.g. PoE magnetics rated 350 mA on a PoE input that the standard allows 960 mA."""
+    size_for_current warns and check_current fails when a part carrying a net's current (a
+    series part, not a decoupling cap or TVS to ground) is rated below that net's current:
+    e.g. PoE magnetics rated 350 mA on a PoE input that the standard allows 960 mA. The copper
+    is still sized for the net's full current."""
     from . import part_ratings
     return {"saved": part_ratings.set_rating(part_number, current_a, source, note), "file": part_ratings.path()}
 
@@ -558,7 +589,9 @@ def size_for_current(nets: list[str] | None = None, current_a: float | None = No
     """Trace width each net needs for its current on every copper layer (IPC-2221, conservative:
     I = k dT^0.44 A^0.725, k 0.048 outer / 0.024 inner), from each layer's real copper thickness
     (the board's stackup; 0.5 oz inner layers need several times the outer width). Uses the
-    currents saved with set_net_current, or current_a for the nets given. Suggests a current-tier
+    currents saved with set_net_current, or current_a for the nets given, always the net's full
+    current: a rated part on the path (set_part_rating) below it is reported under "warnings"
+    ("U5 (X) is rated 2 A on a 3 A net"), it does not lower the width. Suggests a current-tier
     net class (e.g. pwr_1A with the outer width) to create with set_net_class and assign with
     assign_net_class, so DRC flags narrower traces."""
     from fusion_offline import current as CU
@@ -586,10 +619,7 @@ def size_for_current(nets: list[str] | None = None, current_a: float | None = No
     for net, v in want.items():
         amps = v["a"]
         parts = part_ratings.ratings_on(root, net, rated)
-        limit = None
-        if parts and parts[0]["current_a"] < amps:
-            limit = parts[0]
-            amps = limit["current_a"]
+        low = [p for p in parts if p["current_a"] < amps]
         need = CU.required(amps, v["delta_t_c"], copper)
         widths, fab_note = _practical(need, copper, fab_min)
         outer = max(widths[copper[n]["name"]] for n in need if copper[n]["outer"])
@@ -612,11 +642,12 @@ def size_for_current(nets: list[str] | None = None, current_a: float | None = No
                                             if fits else {"name": f"pwr_{amps:g}A", "width_mm": outer, "existing": False})
         if parts:
             rows[net]["rated_parts"] = [{"ref": r["ref"], "part": r["part"], "current_a": r["current_a"],
-                                         "source": r["source"]} for r in parts]
-        if limit:
-            rows[net]["limited_by"] = (f"{limit['ref']} ({limit['part']}) is rated {limit['current_a']} A, below the "
-                                       f"{v['a']} A set for {net}: sized for the part. If more current must flow, "
-                                       "that part has to change too.")
+                                         "source": r["source"], "in_path": r["in_path"]} for r in parts]
+        if low:
+            rows[net]["warnings"] = [f"{p['ref']} ({p['part']}) is rated {p['current_a']:g} A on a {amps:g} A net: "
+                                     "the copper is still sized for the net's current, which the part does not "
+                                     "reduce. Change the part, or lower the net current if less really flows."
+                                     for p in low]
     return {"nets": rows, "copper": {c["name"]: {"copper_mm": c["copper_mm"], "outer": c["outer"],
                                                  "from": c["source"]} for c in copper.values()},
             "method": "IPC-2221 (conservative); IPC-2152 gives narrower widths for the same rise",
@@ -626,11 +657,14 @@ def size_for_current(nets: list[str] | None = None, current_a: float | None = No
 
 
 @tool(READ)
-def check_current(nets: list[str] | None = None, via_current_a: float = 1.0) -> dict:
+def check_current(nets: list[str] | None = None, via_current_a: float = 0.8) -> dict:
     """Check routed copper against the saved net currents (set_net_current): the narrowest segment
-    per layer against the IPC-2221 width for that layer's copper, and the via count against the
-    current (via_current_a per via, about 1 A for a 0.3 mm via). Layers where the net has a pour
-    are not judged by trace width."""
+    per layer against the IPC-2221 width for that layer's copper, and the vias at each layer
+    change (vias within 2 mm, or joined by a short segment, count as one change) against the
+    current: via_current_a per via, default 0.8 A (IPC-2221, inner k, on a 0.3 mm barrel with
+    25 um plating at 10 degC gives about 0.84 A); lower it for thinner plating (about 0.7 A at
+    18 um). Fails when a rated part carrying the net's current (set_part_rating) is rated below
+    it. Layers where the net has a pour are not judged by trace width."""
     from fusion_offline import current as CU
     dname, saved = _currents()
     want = {n: v for n, v in saved.items() if not nets or n in nets}
@@ -714,7 +748,8 @@ def check_length_groups(groups: list[str] | None = None) -> dict:
     if unknown:
         raise ValueError(f"no length group {', '.join(unknown)}; groups: {', '.join(sorted(saved))}")
     root = D.read_xml(_snap(schematic=False).board_xml)
-    res = [LG.evaluate(root, saved[g]) for g in want]
+    depths = _layer_depths(root)[0]
+    res = [LG.evaluate(root, saved[g], depths) for g in want]
     return {"design": dname, "ok": all(r["ok"] for r in res), "groups": res}
 
 
@@ -1211,19 +1246,35 @@ def new_sheet(title: str = "", frame: str | None = None, sheet: int | None = Non
 class _IgnoreViolators:
     """Run a placement edit in Fusion's 'Ignore Violators' mode and restore the
     user's mode after. In the default 'push' mode Fusion shoves a moved part
-    away from others, even on the other side of the board."""
+    away from others, even on the other side of the board.
+    The lock all server processes share is held from setting the mode to restoring it, so
+    another session's write cannot run in the wrong mode or have its mode reset. A busy or
+    unreachable Fusion is raised, never skipped; only an add-in without the op is tolerated."""
     def __enter__(self):
         self.prev = None
+        self._stack = contextlib.ExitStack()
+        lock = getattr(session.bridge, "lock", None)
+        if lock is not None:
+            self._stack.enter_context(lock.hold("ignore violators"))
         try:
             self.prev = session.bridge.call("violation_mode", {"set": "ignore"})["before"]
-        except (BridgeOpError, BridgeUnavailable):
+        except BridgeOpError:
             pass
+        except BaseException:
+            self._stack.close()
+            raise
         return self
 
     def __exit__(self, *exc):
-        if self.prev and self.prev != "ignore":
-            with contextlib.suppress(BridgeOpError, BridgeUnavailable):
-                session.bridge.call("violation_mode", {"set": self.prev})
+        try:
+            if self.prev and self.prev != "ignore":
+                try:
+                    session.bridge.call("violation_mode", {"set": self.prev})
+                except (BridgeOpError, BridgeUnavailable):
+                    if exc[0] is None:          # do not hide the edit's own error behind this one
+                        raise
+        finally:
+            self._stack.close()
         return False
 
 
@@ -1310,7 +1361,9 @@ def tidy_placement(parts: list[str] | None = None, region_mm: list[float] | None
     anything more than max_move_mm, introduces a courtyard overlap or a pad gap under the rules,
     or brings courtyards closer than rework_gap_mm (or closer than they already were). Silkscreen
     is never a reason to move. parts / region_mm [x0, y0, x1, y1] limit what may move; keep lists
-    parts to leave exactly as placed (no nudge either), e.g. a deliberately placed T1.
+    parts to leave exactly as placed (no nudge either), e.g. a deliberately placed T1. Parts
+    locked in Fusion are left alone too, and a part whose pad is on a neighbour's pad row or
+    column (as place_inline leaves it) is never snapped or lined up off it.
     dry_run=true (default) writes nothing: the move_parts preview and report plus what each part
     gets and why, which parts were left alone and why, and moves dropped by the rules above.
     Run again with dry_run=false (and design=) to apply it."""
@@ -1533,7 +1586,11 @@ def route_pair(p_net: str, n_net: str, centreline_mm: list[list[float]], width_m
     at most detour_max_depth_mm deep (several if needed), on detour_side "left", "right" or "auto"
     (the side with fewer conflicts). group="MDI" (a saved length group, see set_length_group) works
     out add_length_mm itself: the group's target minus the member's whole path (its other nets,
-    series parts and this route).
+    series parts and this route, measured the group's way: pair_average or max, and through
+    series parts as the group says), with any copper p_net / n_net already have left out.
+    Lengths include each via's barrel between the layers it joins (p.via_mm / n.via_mm, from the
+    design's stackup; via_depths_from says where the depths came from), so a trace with more vias
+    than its partner is tuned for them.
     Clearances are the ones DRC enforces: the board's wire rules, each other net's class
     clearance and the pair's own class clearance (from the class's design rule, else the
     class), plus margin_mm so 45-degree rounding cannot dip below them. A pair gap below its
@@ -1548,8 +1605,10 @@ def route_pair(p_net: str, n_net: str, centreline_mm: list[list[float]], width_m
     start, other = (bottom, top) if str(layer).lower() == "bottom" else (top, bottom)
     net_cl = _class_clearances(root)
     pair_cl = max((net_cl.get(n, 0.0) for n in (p_net, n_net)), default=0.0) or None
+    depths, depths_from = _layer_depths(root)
+
     def plan_with(add):
-        return PR.plan_pair(root, p_net, n_net, centreline_mm, width_mm, gap_mm, layer=start, other_layer=other,
+        out = PR.plan_pair(root, p_net, n_net, centreline_mm, width_mm, gap_mm, layer=start, other_layer=other,
                             p_tail=p_tail_mm, n_tail=n_tail_mm, p_head=p_head_mm, n_head=n_head_mm,
                             via_drill=via_drill_mm, via_diameter=via_diameter_mm, max_skew_mm=max_skew_mm, tune=tune,
                             chamfer_mm=chamfer_mm, layer_changes=layer_changes, net_clearance=net_cl,
@@ -1557,7 +1616,9 @@ def route_pair(p_net: str, n_net: str, centreline_mm: list[list[float]], width_m
                             tune_flat=tune_flat_mm, tune_gap=tune_gap_mm, tune_max_height=tune_max_height_mm,
                             tune_at=tune_at, same_net_gap=same_net_gap_mm, min_width=_fab_min_width(root),
                             neck_down=neck_down, add_length=add, detour_style=detour_style,
-                            detour_max_depth=detour_max_depth_mm, detour_side=detour_side)
+                            detour_max_depth=detour_max_depth_mm, detour_side=detour_side, layer_depths=depths)
+        out["via_depths_from"] = depths_from
+        return out
     plan = plan_with(add_length_mm)
     if group:
         from fusion_offline import length_groups as LG
@@ -1565,21 +1626,33 @@ def route_pair(p_net: str, n_net: str, centreline_mm: list[list[float]], width_m
         if group not in saved:
             raise ValueError(f"no length group {group!r}; groups: {', '.join(sorted(saved)) or 'none'}")
         g = saved[group]
+        follow = g.get("follow_series", True)
         member = next((m for m in g["members"] if isinstance(m, list) and
-                       {p_net, n_net} & set(LG.path(root, m[0], g.get("follow_series", True))["nets"]
-                                            + LG.path(root, m[1], g.get("follow_series", True))["nets"])), None)
+                       {p_net, n_net} & set(LG.path(root, m[0], follow, depths)["nets"]
+                                            + LG.path(root, m[1], follow, depths)["nets"])), None)
         if member is None:
             raise ValueError(f"{p_net}/{n_net} is not on the path of any pair in group {group!r}")
-        ev = LG.evaluate(root, g)
+        ev = LG.evaluate(root, g, depths)
         others = [r["length_mm"] for r in ev["members"] if r["nets"] != member]
         target = ev["target_mm"] if g.get("target", "longest") != "longest" else max(others, default=0.0)
-        now = (LG.path(root, member[0])["length_mm"] + LG.path(root, member[1])["length_mm"]) / 2
+        # each side of the member without the copper this route replaces (any old route of p_net or
+        # n_net is left out), plus the planned trace on that side
+        sides = [LG.path(root, m, follow, depths, skip={p_net, n_net}) for m in member]
+        now = [sd["length_mm"] for sd in sides]
+        for k, sd in enumerate(sides):
+            for key in ("p", "n"):
+                if plan[key]["net"] in sd["nets"]:
+                    now[k] += plan[key]["length_mm"]
+        measure = g.get("measure", "pair_average")
+        of = max if measure == "max" else (lambda v: sum(v) / 2)     # the group's measure of a pair
+        with_route = of(now)
         planned = (plan["p"]["length_mm"] + plan["n"]["length_mm"]) / 2
-        need = round(target - now - planned, 4)
-        info = {"name": group, "member": "/".join(member), "target_mm": target, "path_without_route_mm": round(now, 3),
-                "route_mm": round(planned, 3), "add_mm": max(need, 0.0)}
+        need = round(target - with_route, 4)                   # detours add the same to both sides
+        info = {"name": group, "member": "/".join(member), "target_mm": target, "measure": measure,
+                "path_without_route_mm": round(of([sd["length_mm"] for sd in sides]), 3),
+                "route_mm": round(planned, 3), "member_with_route_mm": round(with_route, 3), "add_mm": max(need, 0.0)}
         if need > 1e-3:
-            plan = plan_with(need)
+            plan = plan_with(add_length_mm + need)
         elif need < -(g.get("inter_tol_mm") or 0.0):
             info["note"] = (f"this route already makes the member {-need:.3f} mm longer than the group target: "
                             "shorten its path, or the others need lengthening")
@@ -2066,8 +2139,10 @@ def _layer_joints(snap, nets=None) -> list[str]:
 
 
 def tempfile_dir() -> str:
-    import tempfile
-    return tempfile.gettempdir()
+    from . import data_dir                    # per-user folder, not a shared temp folder
+    d = data_dir("previews")
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 @tool(CHANGE)
@@ -2801,7 +2876,8 @@ def get_design_rules() -> dict:
     vals = {k: (_re.search(r'name="' + k + r'" value="([^"]*)"', x) or [None, None])[1] for k in keys}
     warn = []
     if vals.get("mdCopperDimension") in ("40mil", "1.016mm"):
-        warn.append("board edge clearance is the 40 mil Fusion default; JLC needs only 0.3 mm. Load a rule set "
+        warn.append("board edge clearance is the 40 mil Fusion default; JLC's published minimum is 0.2 mm copper to "
+                    "a routed edge (0.4 mm to a V-cut), and 0.3 mm leaves a comfortable margin. Load a rule set "
                     "before pouring or routing: list_design_rules shows the bundled JLC .edru files")
     if vals.get("msDrill") == "0.35mm":
         warn.append("minimum drill is the 0.35 mm default; check it against your fab")
@@ -2839,6 +2915,14 @@ def _rules_base(allow_unsaved: bool):
 def _save_rule_file(name: str, text: str, out_dir: str | None) -> str:
     from . import data_dir
     folder = out_dir or data_dir("rules")
+    # rule files go only to the per-user rules folder, the temp folder or the user's Downloads / Documents
+    import tempfile
+    home = os.path.expanduser("~")
+    allowed = [os.path.realpath(p) for p in (data_dir("rules"), tempfile.gettempdir(),
+                                                os.path.join(home, "Downloads"), os.path.join(home, "Documents"))]
+    real = os.path.realpath(folder)
+    if not any(real == a or real.startswith(a + os.sep) for a in allowed):
+        raise ValueError(f"out_dir must be inside {', '.join(allowed)}")
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, re.sub(r"[^\w.+-]+", "_", name) + ".edru")
     with open(path, "w", encoding="utf-8") as f:
@@ -2859,19 +2943,24 @@ def edit_design_rules(teardrops: dict | None = None, pair_max_length_difference_
     default 10 mm checks nothing useful; see length_tolerances); pair_gap_factor: Fusion's pair gap
     factor. clearances_mm: built-in clearances {"wire_wire", "wire_pad", "wire_via", "pad_pad",
     "pad_via", "via_via": mm}. Refuses while the design has unsaved changes (allow_unsaved to override).
-    get_design_rules shows the current values."""
+    get_design_rules shows the current values. out_dir: the per-user rules folder (default), the
+    temp folder, or a folder in the user's Downloads or Documents."""
     from fusion_offline import rules_edit as RE
     root, xml, note, board_name = _rules_base(allow_unsaved)
     classes = {int(c.get("number")): c.get("name") for c in root.iterfind("./drawing/board/classes/class")}
+    clamped: list[str] = []
     text, changes, unchanged = RE.edit(xml, classes, teardrops, pair_max_length_difference_mm, pair_gap_factor,
-                                       clearances_mm, title=f"{board_name} (edited rules)")
+                                       clearances_mm, title=f"{board_name} (edited rules)", clamped=clamped)
     if not changes:
         return {"file": None, "changes": [], "unchanged": unchanged, "based_on": note,
                 "note": "every value asked for is already in the rules: no file written"}
     path = _save_rule_file(f"{board_name} rules", text, out_dir)
-    return {"file": path, "changes": changes, "unchanged": unchanged, "based_on": note,
-            "next": ["In Fusion open the DRC / Design Rules dialog, Rules > Load, and pick this file.",
-                     "Check with get_design_rules."]}
+    out = {"file": path, "changes": changes, "unchanged": unchanged, "based_on": note,
+           "next": ["In Fusion open the DRC / Design Rules dialog, Rules > Load, and pick this file.",
+                    "Check with get_design_rules."]}
+    if clamped:
+        out["clamped"] = clamped
+    return out
 
 
 @tool(READ)
@@ -2903,7 +2992,9 @@ def set_net_class(name: str, width_mm: float, clearance_mm: float, drill_mm: flo
     survived UNDO.) Without drill_mm, the class gets no drill rule.
     The file is built from the rules as Fusion last SAVED them, and loading a rule file replaces
     all rules: with unsaved changes, rules made since the last save would be lost. So it refuses
-    while the design has unsaved changes; save first (allow_unsaved=true to build it anyway)."""
+    while the design has unsaved changes; save first (allow_unsaved=true to build it anyway).
+    out_dir: the per-user rules folder (default), the temp folder, or a folder in the user's
+    Downloads or Documents."""
     from fusion_offline import net_classes as NC
     root, xml, note, board_name = _rules_base(allow_unsaved)
     classes = [{"number": int(c.get("number")), "name": c.get("name")}
@@ -3001,49 +3092,55 @@ def autoroute(nets: list[str] | None = None, engine: str = "fusion", timeout_s: 
     if engine != "fusion":
         raise ValueError("engine must be 'fusion' (freerouting support is planned)")
     from . import autoroute as AR
-    before = session.snapshot(schematic=False)
-    session.activate("board")
-    cmd = "AUTO " + " ".join(C.q(n) for n in nets) + ";" if nets else "AUTO;"
-    import tempfile
-    tmp = tempfile.mkdtemp(prefix="fusion-mcp-auto-")
-    saved = os.path.join(tmp, "design.ctl").replace("\\", "/")
-    restore = False
-    if not top_router:
-        session.bridge.call("run", {"commands": f"AUTO SAVE {C.q(saved)};", "editor": "board"}, timeout=60)
-        if os.path.exists(saved):
-            with open(saved, encoding="utf-8", errors="replace") as f:
-                text = f.read()
-            job = os.path.join(tmp, "job.ctl").replace("\\", "/")
-            with open(job, "w", encoding="utf-8") as f:
-                f.write(AR.ctl_without_top_router(text))
-            session.bridge.call("run", {"commands": f"AUTO LOAD {C.q(job)};", "editor": "board"}, timeout=60)
-            restore = True
-    try:
-        run = AR.run(session.bridge, cmd, timeout_s,
-                     answers=[(AR.PLANE_LAYERS_PROMPT, "Yes")] if route_past_planes else None)
-    finally:
-        if restore:
-            with contextlib.suppress(BridgeOpError, BridgeUnavailable):
-                session.bridge.call("run", {"commands": f"AUTO LOAD {C.q(saved)};", "editor": "board"}, timeout=60)
-    m0 = _routing_state(before)
-    after = session.snapshot(schematic=False)
-    m1 = _routing_state(after)
-    for _ in range(10):                     # Fusion may still be applying the chosen variant
-        if m1 != m0 or run["applied"] is None:
-            break
-        time.sleep(3)
+    # one lock hold for the whole job (AUTO SAVE, LOAD, the run, the restore, the read-back), so
+    # another session cannot act on Fusion in between
+    lock = getattr(session.bridge, "lock", None)
+    with (lock.hold("autoroute") if lock else contextlib.nullcontext()):
+        before = session.snapshot(schematic=False)
+        session.activate("board")
+        cmd = "AUTO " + " ".join(C.q(n) for n in nets) + ";" if nets else "AUTO;"
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="fusion-mcp-auto-")
+        saved = os.path.join(tmp, "design.ctl").replace("\\", "/")
+        restore = False
+        if not top_router:
+            session.bridge.call("run", {"commands": f"AUTO SAVE {C.q(saved)};", "editor": "board"}, timeout=60)
+            if os.path.exists(saved):
+                with open(saved, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                job = os.path.join(tmp, "job.ctl").replace("\\", "/")
+                with open(job, "w", encoding="utf-8") as f:
+                    f.write(AR.ctl_without_top_router(text))
+                session.bridge.call("run", {"commands": f"AUTO LOAD {C.q(job)};", "editor": "board"}, timeout=60)
+                restore = True
+        try:
+            run = AR.run(session.bridge, cmd, timeout_s,
+                         answers=[(AR.PLANE_LAYERS_PROMPT, "Yes")] if route_past_planes else None)
+        finally:
+            if restore:
+                with contextlib.suppress(BridgeOpError, BridgeUnavailable):
+                    session.bridge.call("run", {"commands": f"AUTO LOAD {C.q(saved)};", "editor": "board"}, timeout=60)
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+        m0 = _routing_state(before)
         after = session.snapshot(schematic=False)
         m1 = _routing_state(after)
-    if m1 == m0:
-        raise WriteFailed("the autorouter ran but the board did not change"
-                          + (" (timed out)" if run["timed_out"] else "")
-                          + (f"; variants seen: {[r['label'] for r in run['variants']]}" if run["variants"] else ""))
-    if run["applied"] is None:
-        run["applied"] = {"note": "Fusion finished and applied the job itself",
-                          "best_seen": AR.best(run["variants"]) if run["variants"] else None}
-    return {"ok": True, "engine": "fusion", "applied_variant": run["applied"], "variants": len(run["variants"]),
-            "stalled_variants_skipped": run.get("stalled", []),
-            "seconds": run["seconds"], "before": m0, "after": m1, "other_dialogs": run["other_dialogs"]}
+        for _ in range(10):                     # Fusion may still be applying the chosen variant
+            if m1 != m0 or run["applied"] is None:
+                break
+            time.sleep(3)
+            after = session.snapshot(schematic=False)
+            m1 = _routing_state(after)
+        if m1 == m0:
+            raise WriteFailed("the autorouter ran but the board did not change"
+                              + (" (timed out)" if run["timed_out"] else "")
+                              + (f"; variants seen: {[r['label'] for r in run['variants']]}" if run["variants"] else ""))
+        if run["applied"] is None:
+            run["applied"] = {"note": "Fusion finished and applied the job itself",
+                              "best_seen": AR.best(run["variants"]) if run["variants"] else None}
+        return {"ok": True, "engine": "fusion", "applied_variant": run["applied"], "variants": len(run["variants"]),
+                "stalled_variants_skipped": run.get("stalled", []),
+                "seconds": run["seconds"], "before": m0, "after": m1, "other_dialogs": run["other_dialogs"]}
 
 
 @tool(READ)
@@ -3071,7 +3168,7 @@ def render_board(highlight_nets: str | None = None, region_mm: list[float] | Non
         raise ValueError('render_board needs matplotlib: pip install "fusion-electronics-mcp[render]"')
     import tempfile
     root = D.read_xml(_snap(schematic=False).board_xml)
-    out = out_path or os.path.join(tempfile.gettempdir(), "fusion-electronics-mcp-board.png")
+    out = out_path or os.path.join(tempfile_dir(), "fusion-electronics-mcp-board.png")
     info = R.render(root, out, highlight_nets, traces, tuple(region_mm) if region_mm else None,
                     [plan] if plan else None, courtyards=courtyards, silkscreen=silkscreen,
                     pad_numbers=pad_numbers, courtyard_ignore=courtyard_ignore)

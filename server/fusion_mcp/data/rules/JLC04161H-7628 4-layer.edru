@@ -34,9 +34,9 @@
  <rule type="Wire Stub" builtin_ruleid="17" enabled="yes" priority="0" name="wire-stub-1"/>
  <rule type="Air-Wire" builtin_ruleid="19" enabled="yes" priority="0" name="air-wire-1"/>
  <rule type="Matched Lengths" builtin_ruleid="20" enabled="yes" priority="0" tolerance="10mm" gapfactor="2.5" name="matched-lengths-1"/>
- <rule type="Copper Clearance" builtin_ruleid="8" enabled="yes" priority="1" onescope="is_smd" otherscope="is_smd" value="0.14mm" preferredvalue="6mil" samesignal="yes" name="copper-clearance-9"/>
+ <rule type="Copper Clearance" builtin_ruleid="8" enabled="yes" priority="1" onescope="is_smd" otherscope="is_smd" value="0.1mm" preferredvalue="0.1mm" samesignal="yes" name="copper-clearance-9"/>
  <rule type="Copper Clearance" builtin_ruleid="4" enabled="yes" priority="2" onescope="is_pad_smd" otherscope="is_via" value="0.13mm" preferredvalue="0.13mm" samesignal="no" name="copper-clearance-5"/>
- <rule type="Copper Clearance" builtin_ruleid="6" enabled="yes" priority="3" onescope="is_smd" otherscope="is_pad" value="0.13mm" preferredvalue="0.13mm" samesignal="yes" name="copper-clearance-7"/>
+ <rule type="Copper Clearance" builtin_ruleid="6" enabled="yes" priority="3" onescope="is_smd" otherscope="is_pad" value="0.1mm" preferredvalue="0.1mm" samesignal="yes" name="copper-clearance-7"/>
  <rule type="Copper Clearance" builtin_ruleid="0" enabled="yes" priority="4" onescope="is_wire_polygon" otherscope="is_wire_polygon" value="0.12mm" preferredvalue="0.12mm" samesignal="no" name="copper-clearance-1"/>
  <rule type="Copper Clearance" builtin_ruleid="3" enabled="yes" priority="5" onescope="is_pad_smd" otherscope="is_pad_smd" value="0.12mm" preferredvalue="0.13mm" samesignal="no" name="copper-clearance-4"/>
  <rule type="Copper Clearance" builtin_ruleid="5" enabled="yes" priority="6" onescope="is_via" otherscope="is_via" value="0.12mm" preferredvalue="0.12mm" samesignal="no" name="copper-clearance-6"/>
@@ -84,7 +84,7 @@ design rules under a new name.</description>
 <param name="layerSetup" value="(1+2*63+64)"/>
 <param name="mtCopper" value="0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm 0.035mm"/>
 <param name="mtIsolate" value="1.5mm 0.15mm 0.2mm 0.15mm 0.2mm 0.15mm 0.2mm 0.15mm 0.2mm 0.15mm 0.2mm 0.15mm 0.2mm 0.15mm 0.2mm"/>
-<param name="mdViaViaSameLayer" value="0.12mm"/>
+<param name="mdViaViaSameLayer" value="0.1mm"/>
 <param name="mnLayersViaInSmd" value="2"/>
 <param name="mdSmdStop" value="0mil"/>
 <param name="msMicroVia" value="9.99mm"/>

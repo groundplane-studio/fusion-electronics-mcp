@@ -22,6 +22,10 @@ CLEARANCE = {"wire_wire": ("is_wire_polygon", "is_wire_polygon", "mdWireWire"),
              "pad_pad": ("is_pad_smd", "is_pad_smd", "mdPadPad"),
              "pad_via": ("is_pad_smd", "is_via", "mdPadVia"),
              "via_via": ("is_via", "is_via", "mdViaVia")}
+# Fusion stops DRC on a plausibility prompt ("Some of the Clearance parameters for same signals are
+# larger than those for different signals") when a same-signal clearance is above a different-signal one
+SAME_SIGNAL = ("mdSmdSmd", "mdSmdPad", "mdSmdVia", "mdViaViaSameLayer")
+DIFFERENT_SIGNAL = ("mdWireWire", "mdWirePad", "mdWireVia", "mdPadPad", "mdPadVia", "mdViaVia")
 EAGLE_PAIR_DEFAULT = 10.0           # mm: dpMaxLengthDifference / Matched Lengths tolerance out of the box
 
 
@@ -64,11 +68,46 @@ def settings(rules_xml: str) -> dict:
     return {"teardrops": tear, "pair": pair, "clearances_mm": clear, "warnings": warnings}
 
 
+def clamp_same_signal(root: ET.Element) -> list[str]:
+    """Lower every same-signal clearance (the md* params SAME_SIGNAL and the built-in Copper
+    Clearance rules with samesignal="yes") that is above the smallest different-signal clearance
+    to that value, so Fusion's DRC does not stop on its plausibility prompt. Returns one line per
+    value lowered."""
+    params = {p.get("name"): p for p in root.iter("param")}
+    diff = [_mm(params[n].get("value")) for n in DIFFERENT_SIGNAL if n in params]
+    builtin = [r for r in root.iter("rule") if r.get("type") == "Copper Clearance" and r.get("builtin_ruleid") is not None]
+    diff += [_mm(r.get("value")) for r in builtin if r.get("samesignal", "no") != "yes"]
+    diff = [d for d in diff if d is not None]
+    if not diff:
+        return []
+    floor = min(diff)
+    out = []
+    for n in SAME_SIGNAL:
+        v = _mm(params[n].get("value")) if n in params else None
+        if v is not None and v > floor + 1e-9:
+            params[n].set("value", f"{floor:g}mm")
+            out.append(f"{n} lowered from {v:g} mm to {floor:g} mm (a same-signal clearance may not exceed the "
+                       "smallest different-signal clearance, or Fusion's DRC stops on a plausibility prompt)")
+    for r in builtin:
+        if r.get("samesignal", "no") != "yes":
+            continue
+        for attr in ("value", "preferredvalue"):
+            v = _mm(r.get(attr))
+            if v is not None and v > floor + 1e-9:
+                r.set(attr, f"{floor:g}mm")
+                out.append(f"same-signal rule {r.get('name')} ({r.get('onescope')} / {r.get('otherscope')}) {attr} "
+                           f"lowered from {v:g} mm to {floor:g} mm (smallest different-signal clearance)")
+    return out
+
+
 def edit(rules_xml: str, classes: dict[int, str], teardrops: dict | None = None,
          pair_max_length_difference_mm: float | None = None, pair_gap_factor: float | None = None,
-         clearances_mm: dict | None = None, title: str | None = None) -> tuple[str | None, list[str], list[str]]:
+         clearances_mm: dict | None = None, title: str | None = None,
+         clamped: list | None = None) -> tuple[str | None, list[str], list[str]]:
     """(the rules with the changes applied as .edru text, what changed, what already had the value
     asked for). The text is None when nothing differs.
+    Before the file is written, same-signal clearances above the smallest different-signal one are
+    lowered to it (clamp_same_signal); pass a list as `clamped` to receive one line per value lowered.
     teardrops: {"via" | "pad" | "smd" | "wire_polygon" | "all": {enabled, auto_generate, lengthratio,
     widthratio, curved_sides}} (only the keys given change); clearances_mm: {"wire_wire": 0.12, ...}."""
     root = ET.fromstring(rules_xml)
@@ -148,5 +187,8 @@ def edit(rules_xml: str, classes: dict[int, str], teardrops: dict | None = None,
         raise ValueError("nothing to change")
     if not changes:
         return None, [], unchanged
+    lowered = clamp_same_signal(root)
+    if clamped is not None:
+        clamped.extend(lowered)
     set_classes(root, classes)
     return edru_text(root, title), changes, unchanged

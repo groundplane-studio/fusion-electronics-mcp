@@ -441,11 +441,12 @@ def _down(v: float) -> float:
 
 
 def explain_squeeze(x: float, y: float, net: str, layer: int, obstacles, width: float, need, min_width: float,
-                    partner=(), gap: float = 0.0):
+                    partner=(), gap: float = 0.0, neck_down: bool = False):
     """Is a conflict at (x, y) a squeeze: copper on both sides (two pins) leaving no room to move
     the trace (and its partner, when the partner runs between it and the far side)? Then the
     room there and the ways out, for the trace where it is: the widest width that fits (if the
-    fab minimum does) or the clearance that would. None if it is not a squeeze."""
+    fab minimum does) or the clearance that would. neck_down: whether the plan already had
+    neck-down on (then the advice does not suggest turning it on). None if it is not a squeeze."""
     cand = sorted((o for o in obstacles if o.net != net and (o.layers is None or layer in o.layers)
                    and (o.net or o.is_pad)), key=lambda o: o.distance(x, y))
     if len(cand) < 2:
@@ -464,7 +465,10 @@ def explain_squeeze(x: float, y: float, net: str, layer: int, obstacles, width: 
     max_c = a.distance(x, y) - width / 2
     names = [o.net or "an unconnected pad" for o in (a, b)]
     options = []
-    if max_w >= min_width - 1e-6:
+    if max_w >= min_width - 1e-6 and neck_down:
+        options.append(f"a {_down(max_w):.3f} mm neck would fit here, but neck_down (already on) did not narrow "
+                       "this spot: move the route so the trace runs through the squeeze")
+    elif max_w >= min_width - 1e-6:
         options.append(f"neck down to {_down(max_w):.3f} mm over the squeeze (neck_down=true)")
     else:
         options.append(f"no width fits here: even the fab minimum {min_width} mm is too wide")
@@ -476,29 +480,37 @@ def explain_squeeze(x: float, y: float, net: str, layer: int, obstacles, width: 
 
 
 def _split_at(pl, s0: float, s1: float):
-    """A straight polyline cut into (before, middle, after) at path lengths s0 < s1, or None
-    when the cut would fall on an arc."""
-    if any(_curve(q) for q in pl):
-        return None
+    """A polyline cut into (before, middle, after) at path lengths s0 < s1 (arcs measured along
+    the arc), or None when nothing is left between. Arcs are not cut: a cut that falls on one
+    moves out to its end, so the middle takes the whole arc."""
     cum = [0.0]
     for a, b in zip(pl, pl[1:]):
-        cum.append(cum[-1] + math.dist(a[:2], b[:2]))
+        cum.append(cum[-1] + _seg_len(a, b))
     s0, s1 = max(0.0, s0), min(cum[-1], s1)
+    seg = lambda s: min(max(k for k in range(len(cum) - 1) if cum[k] <= s + 1e-12), len(pl) - 2)
+    i0, i1 = seg(s0), seg(s1)
+    if _curve(pl[i0 + 1]):
+        s0 = cum[i0]
+    if _curve(pl[i1 + 1]):
+        s1 = cum[i1 + 1]
     if s1 - s0 < 1e-3:
         return None
 
-    def at(s):
-        i = max(k for k in range(len(cum) - 1) if cum[k] <= s + 1e-12)
-        i = min(i, len(pl) - 2)
-        t = 0.0 if cum[i + 1] - cum[i] < 1e-12 else (s - cum[i]) / (cum[i + 1] - cum[i])
+    def at(i, s):
+        """The point at path length s on segment i: a vertex (its arc kept) or a cut on a straight."""
+        L = cum[i + 1] - cum[i]
+        t = 0.0 if L < 1e-12 else (s - cum[i]) / L
+        if t <= 1e-9:
+            return tuple(pl[i][:2])
+        if t >= 1 - 1e-9:
+            return tuple(pl[i + 1])
         a, b = pl[i], pl[i + 1]
-        return i, (round(a[0] + (b[0] - a[0]) * t, 4), round(a[1] + (b[1] - a[1]) * t, 4))
-    i0, p0 = at(s0)
-    i1, p1 = at(s1)
-    before = [tuple(q[:2]) for q in pl[:i0 + 1]] + [p0]
-    middle = [p0] + [tuple(q[:2]) for q in pl[i0 + 1:i1 + 1]] + [p1]
-    after = [p1] + [tuple(q[:2]) for q in pl[i1 + 1:]]
-    clean = lambda pts: [q for k, q in enumerate(pts) if k == 0 or math.dist(q, pts[k - 1]) > 1e-6]
+        return round(a[0] + (b[0] - a[0]) * t, 4), round(a[1] + (b[1] - a[1]) * t, 4)
+    p0, p1 = at(i0, s0), at(i1, s1)
+    before = [tuple(q) for q in pl[:i0 + 1]] + [p0]
+    middle = [p0[:2]] + [tuple(q) for q in pl[i0 + 1:i1 + 1]] + [p1]
+    after = [p1[:2]] + [tuple(q) for q in pl[i1 + 1:]]
+    clean = lambda pts: [q for k, q in enumerate(pts) if k == 0 or math.dist(q[:2], pts[k - 1][:2]) > 1e-6]
     return clean(before), clean(middle), clean(after)
 
 
@@ -759,7 +771,8 @@ def plan_pair(root: ET.Element, p_net: str, n_net: str, centreline, width: float
               tune_radius: float = 0.25, tune_flat: float = 0.1, tune_gap: float = 0.1, tune_max_height: float = 0.6,
               tune_at: str = "longest", same_net_gap: float = 0.25, min_width: float = 0.09,
               neck_down: bool = False, add_length: float = 0.0, detour_style: str = "45",
-              detour_max_depth: float = 1.0, detour_radius: float | None = None, detour_side: str = "auto") -> dict:
+              detour_max_depth: float = 1.0, detour_radius: float | None = None, detour_side: str = "auto",
+              layer_depths: dict | None = None) -> dict:
     """Plan a coupled route for one pair. centreline: [[x, y], ...] from the
     start pads' end to the end pads' end (the trunk; fan-ins are added).
     p_head / n_head: optional explicit path from that trace's start pad to its
@@ -792,6 +805,9 @@ def plan_pair(root: ET.Element, p_net: str, n_net: str, centreline, width: float
     coupled detours in the centreline (add_detours): detour_style "45" or
     "rounded", at most detour_max_depth deep each, on detour_side "left",
     "right" or "auto" (both tried, the one with fewer conflicts kept).
+    Lengths (and the skew tuned) include each via's barrel between layer and
+    other_layer; layer_depths: {export layer: depth mm} (length_groups.layer_depths,
+    default from the board alone: 1.6 mm assumed without a stackup).
     Layers are export numbers (1 top, 16 bottom)."""
     if add_length and add_length > 1e-4:
         call = {k: v for k, v in locals().items()}
@@ -820,6 +836,14 @@ def plan_pair(root: ET.Element, p_net: str, n_net: str, centreline, width: float
         raise ValueError("tune_style is 'rounded' or '45'")
     if tune_at not in ("longest", "mismatch"):
         raise ValueError("tune_at is 'longest' or 'mismatch'")
+    if layer_depths is None:
+        from .length_groups import layer_depths as _depths
+        layer_depths, depths_from = _depths(root)
+    else:
+        depths_from = "given"
+    if layer not in layer_depths or other_layer not in layer_depths:
+        raise ValueError(f"layer {layer} or {other_layer} is not a copper layer of the board's stack")
+    barrel = abs(layer_depths[layer] - layer_depths[other_layer])
     obs, rules, outline = board_obstacles(root)
     if clearance is None:
         clearance = max(_mm(rules.get(k), 0.0) for k in ("mdWireWire", "mdWirePad", "mdWireVia"))
@@ -910,16 +934,16 @@ def plan_pair(root: ET.Element, p_net: str, n_net: str, centreline, width: float
     p_steps = chamfer_steps(sum(parts["p"], []), chamfer_mm)
     n_steps = chamfer_steps(sum(parts["n"], []), chamfer_mm)
 
-    def steps_len(steps):
-        tr, _ = steps_to_geometry(steps, layer, other_layer)
-        return sum(length(pl) for _, pl in tr)
+    def steps_len(steps):                                 # traces plus via barrels
+        tr, vs = steps_to_geometry(steps, layer, other_layer)
+        return sum(length(pl) for _, pl in tr) + barrel * len(vs)
 
     def run_layer(steps, a):                              # the layer after every via up to the run's start
         return layer if sum(1 for st in steps[:a + 1] if st[0] == "via") % 2 == 0 else other_layer
 
     near = None
     if tune_at == "mismatch":                              # tune next to the end whose pads cause the skew
-        plen = lambda st: sum(length(pl) for _, pl in steps_to_geometry(st, layer, other_layer)[0])
+        plen = steps_len
         head_skew = abs(plen(parts["p"][0]) - plen(parts["n"][0]))
         tail_skew = abs(plen(parts["p"][2]) - plen(parts["n"][2]))
         a_, b_ = (ps, ns) if head_skew >= tail_skew else (pe, ne)
@@ -998,7 +1022,7 @@ def plan_pair(root: ET.Element, p_net: str, n_net: str, centreline, width: float
             near = [q for l_, pl in mine_tr if l_ == cf["layer"] for q in flatten(pl, 0.02)
                     if math.dist(q, cf["at"]) < 1.0]
             x, y = min(near, key=lambda q: math.dist(q, (ox, oy))) if near else cf["at"]
-            sq = explain_squeeze(x, y, cf["net"], cf["layer"], obs, width, need, min_width, partner, gap)
+            sq = explain_squeeze(x, y, cf["net"], cf["layer"], obs, width, need, min_width, partner, gap, neck_down)
             if sq:
                 cf["squeeze"] = sq
     if same_net_gap:
@@ -1034,8 +1058,9 @@ def plan_pair(root: ET.Element, p_net: str, n_net: str, centreline, width: float
     elif pc and gap < pc + max(margin, 0.01) - 1e-6:
         warnings.append(f"the pair gap {gap} mm equals its class clearance {pc} mm: 45-degree segments can round "
                         f"just below it and fail DRC; use a gap of at least {pc + max(margin, 0.01):g} mm")
-    lp = sum(length(pl) for _, pl in p_tr)
-    ln = sum(length(pl) for _, pl in n_tr)
+    p_via, n_via = barrel * len(p_v), barrel * len(n_v)
+    lp = sum(length(pl) for _, pl in p_tr) + p_via
+    ln = sum(length(pl) for _, pl in n_tr) + n_via
     if necks:
         warnings.append(f"{len(necks)} neck-down section(s): impedance rises there; check it with "
                         "estimate_impedance at the neck width")
@@ -1049,9 +1074,10 @@ def plan_pair(root: ET.Element, p_net: str, n_net: str, centreline, width: float
     tr_out = lambda tw: [{"layer": l, "points": [[round(v, 4) for v in q] for q in pl], "width": round(w_, 4)}
                          for l, pl, w_ in tw]
     return {"p": {"net": p_net, "traces": tr_out(p_tw), "vias": [[round(x, 4), round(y, 4)] for x, y in p_v],
-                  "length_mm": round(lp, 3)},
+                  "length_mm": round(lp, 3), "via_mm": round(p_via, 3)},
             "n": {"net": n_net, "traces": tr_out(n_tw), "vias": [[round(x, 4), round(y, 4)] for x, y in n_v],
-                  "length_mm": round(ln, 3)},
+                  "length_mm": round(ln, 3), "via_mm": round(n_via, 3)},
+            "via_barrel_mm": round(barrel, 4), "via_depths_from": depths_from,
             "necks": necks,
             "skew_mm": round(lp - ln, 4), "skew_before_tuning_mm": skew_before, "tuning_added_mm": round(added, 4),
             "skew_ok": skew_ok, "crossed": crossed, "p_side": "left" if p_left else "right",

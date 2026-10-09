@@ -200,17 +200,53 @@ def critical_parts(root: ET.Element, pad_list=None, extra=()) -> tuple[dict, dic
     return why, group
 
 
+def _near_poly(poly, x, y, r) -> bool:
+    """True when (x, y) is inside the convex polygon or within r of its edge."""
+    from .stitch import _inside_poly
+    if _inside_poly(poly, x, y):
+        return True
+    for (ax, ay), (bx, by) in zip(poly, poly[1:] + poly[:1]):
+        dx, dy = bx - ax, by - ay
+        L = dx * dx + dy * dy
+        u = 0.0 if L == 0 else max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / L))
+        if math.hypot(ax + u * dx - x, ay + u * dy - y) <= r:
+            return True
+    return False
+
+
 def routed_parts(root: ET.Element, pad_list) -> set[str]:
-    """Parts with a trace or via ending on one of their pads."""
-    ends = set()
+    """Parts with a trace end or a via on one of their pads: anywhere on the pad's copper (its
+    rotated rectangle, circle or long shape), not just its centre, and on a layer the pad is on
+    (a top trace does not touch a bottom SMD pad; through-hole pads are on every layer)."""
+    from .placement_check import _Grid
+    grid = _Grid()
+    for p in pad_list:
+        grid.add(p, p.bbox)
+    ends = []                                       # (x, y, layer or None for a via)
     for s in root.iterfind("./drawing/board/signals/signal"):
         for w in s.iterfind("wire"):
-            if w.get("layer") != "19":
-                ends.add((round(float(w.get("x1")), 3), round(float(w.get("y1")), 3)))
-                ends.add((round(float(w.get("x2")), 3), round(float(w.get("y2")), 3)))
+            lay = w.get("layer")
+            if lay == "19":
+                continue
+            for k in ("1", "2"):
+                ends.append((float(w.get("x" + k)), float(w.get("y" + k)), lay))
         for v in s.iterfind("via"):
-            ends.add((round(float(v.get("x")), 3), round(float(v.get("y")), 3)))
-    return {p.ref for p in pad_list if (round(p.x, 3), round(p.y, 3)) in ends}
+            ends.append((float(v.get("x")), float(v.get("y")), None))
+    out = set()
+    eps = 1e-3
+    for x, y, lay in ends:
+        for p in grid.near((x, y, x, y), eps):
+            if p.ref in out:
+                continue
+            if lay is not None and p.smd and not (lay == "1" and "top" in p.sides or
+                                                  lay == "16" and "bottom" in p.sides):
+                continue
+            b = p.bbox
+            if not (b[0] - eps <= x <= b[2] + eps and b[1] - eps <= y <= b[3] + eps):
+                continue
+            if math.hypot(x - p.x, y - p.y) <= eps or _near_poly(p.poly, x, y, eps):
+                out.add(p.ref)
+    return out
 
 
 def _courtyard_gaps(root: ET.Element, refs, near: float) -> dict:
@@ -231,16 +267,21 @@ def tidy(root: ET.Element, refs=None, region=None, grid: dict | None = None, cri
          keep=()) -> dict:
     """Plan tidy moves. Returns {moves (for move_parts), actions: part -> [what], left_alone:
     [{part, why}], dropped: [{part, why}]}. Nothing is moved for silkscreen. keep: parts left
-    exactly as placed (no nudge either); they still anchor the lines their neighbours join."""
+    exactly as placed (no nudge either); they still anchor the lines their neighbours join.
+    Parts locked in Fusion (locked="yes") are left alone like keep. A part whose pad sits on a
+    neighbour's pad row or column (as place_inline leaves it) is not snapped or lined up off it
+    on that axis. A P/N pair group is dropped as a whole when any member's move is dropped."""
     from .placement_check import resolve_moves
     grid = {**DEFAULT_GRID, **(grid or {})}
     pad_list = pads(root)
     n_pads = defaultdict(int)
     for p in pad_list:
         n_pads[p.ref] += 1
-    pos = {}
+    pos, locked = {}, set()
     for el in root.iterfind("./drawing/board/elements/element"):
         r = el.get("name")
+        if (el.get("locked") or "").lower() in ("yes", "true", "1"):
+            locked.add(r)
         if n_pads.get(r):
             ang, bot = FP.parse_rot(el.get("rot"))
             pos[r] = {"x": float(el.get("x")), "y": float(el.get("y")), "angle": ang % 360, "bottom": bot,
@@ -261,17 +302,30 @@ def tidy(root: ET.Element, refs=None, region=None, grid: dict | None = None, cri
     snap = lambda v, g: round(round(v / g) * g, 4)
     free = set()
     for r in scope:
-        if r in keep:
+        if r in locked:
+            left[r] = "locked in Fusion: unlock it to let tidy move it"
+        elif r in keep:
             left[r] = "kept as placed (keep)"
         elif r in routed:
             left[r] = "routed: traces end on its pads, moving it would drag them (skip_routed=false to allow)"
         elif r not in why:
             free.add(r)
 
+    # a part whose pad is on a neighbour's pad row (or column), as place_inline leaves it, keeps
+    # that axis: snapping or lining it up would pull the pad off the row
+    links = connections(pad_list)
+    follows = {r: {c["to_part"] for c in ls if abs(c["offset_mm"]) <= 0.05} for r, ls in links.items()}
+    pinned = {r: {"y" if c["along"] == "row" else "x" for c in ls if abs(c["offset_mm"]) <= 0.05}
+              for r, ls in links.items()}
+
     # 1. grid
     for r in sorted(free, key=_natural):
         g = grid[pos[r]["cls"]]
         x, y = snap(t[r]["x"], g), snap(t[r]["y"], g)
+        if "x" in pinned.get(r, ()):
+            x = t[r]["x"]
+        if "y" in pinned.get(r, ()):
+            y = t[r]["y"]
         if abs(x - t[r]["x"]) > 1e-6 or abs(y - t[r]["y"]) > 1e-6:
             t[r]["x"], t[r]["y"] = x, y
             actions[r].append(f"onto the {g} mm grid")
@@ -295,7 +349,8 @@ def tidy(root: ET.Element, refs=None, region=None, grid: dict | None = None, cri
         stuck = [r for r in everyone if r not in members]
         if stuck:
             for r in members:
-                left[r] = f"pair {name} group moves only as one, and {', '.join(stuck)} cannot move (routed, kept or out of scope)"
+                left[r] = (f"pair {name} group moves only as one, and {', '.join(stuck)} cannot move "
+                       "(routed, kept, locked or out of scope)")
             continue
         a = members[0]
         g = grid[pos[a]["cls"]]
@@ -331,10 +386,10 @@ def tidy(root: ET.Element, refs=None, region=None, grid: dict | None = None, cri
                 clusters[find(r)].append(r)
             for members in clusters.values():
                 vals = [round(t[m][k], 4) for m in members]
-                movers = [m for m in members if m in free]
+                movers = [m for m in members if m in free and k not in pinned.get(m, ())]
                 if len(members) < 2 or max(vals) - min(vals) <= 1e-4 or not movers:
                     continue
-                fixed = {round(t[m][k], 4) for m in members if m not in free}
+                fixed = {round(t[m][k], 4) for m in members if m not in movers}
                 if len(fixed) > 1:
                     continue                                 # two fixed parts disagree: leave it
                 if fixed:
@@ -356,8 +411,6 @@ def tidy(root: ET.Element, refs=None, region=None, grid: dict | None = None, cri
 
     # 3. even pitch along exact rows/columns of one package, only small irregularities
     if spread:
-        follows = {r: {c["to_part"] for c in links if abs(c["offset_mm"]) <= 0.05}
-                   for r, links in connections(pad_list).items()}
         lines = defaultdict(list)
         for r in free:
             lines[("row", t[r]["bottom"], pos[r]["pkg"], round(t[r]["y"], 4))].append(r)
@@ -414,15 +467,26 @@ def tidy(root: ET.Element, refs=None, region=None, grid: dict | None = None, cri
                                      or abs(t[r]["angle"] - pos[r]["angle"]) > 1e-6)]
 
     def drop(r, reason):
+        done = {d["part"] for d in dropped}
+        if r in done:
+            return
         t[r] = dict(pos[r])
         actions.pop(r, None)
         dropped.append({"part": r, "why": reason})
+        if r in group:                                    # a pair group moves as one or not at all
+            for m in sorted((m for m in scope if group.get(m) == group[r] and m != r), key=_natural):
+                if m not in done and m in actions:
+                    t[m] = dict(pos[m])
+                    actions.pop(m, None)
+                    dropped.append({"part": m, "why": f"pair {group[r]} group moves only as one, "
+                                                      f"and {r}'s move was dropped ({reason})"})
     for r in moved_list():
         d = math.hypot(t[r]["x"] - pos[r]["x"], t[r]["y"] - pos[r]["y"])
         if d > max_move + 1e-9:
             drop(r, f"would move {d:.3f} mm (max_move {max_move})")
     gap_near = max(rework_gap, 0.0) + 0.05
-    for _ in range(8):
+    passes = 8
+    for n in range(passes + 1):
         moved = moved_list()
         if not moved:
             break
@@ -446,6 +510,10 @@ def tidy(root: ET.Element, refs=None, region=None, grid: dict | None = None, cri
                         bad.setdefault(r, f"courtyard gap to {pair[1] if r == pair[0] else pair[0]} would drop "
                                           f"to {gap:.3f} mm (keeps at least {need if need != math.inf else 0:.3f})")
         if not bad:
+            break
+        if n == passes:                                   # never return moves that were not checked clean
+            for r in moved:
+                drop(r, bad.get(r, f"still conflicting after {passes} passes of dropping moves"))
             break
         for r, reason in bad.items():
             drop(r, reason)

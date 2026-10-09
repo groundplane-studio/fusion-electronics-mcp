@@ -70,8 +70,37 @@ take `design=` and refuse when Fusion's active design is another one.
 - New `delete_copper` tool: deletes chosen vias, trace segments and pours of one net and leaves
   the rest alone. To redraw a pour that has stopped filling properly, delete it and `add_pour` it
   again.
-- JLC rule files: the same-signal via clearance no longer exceeds the different-signal one, so
-  Fusion's plausibility prompt no longer blocks DRC.
+- JLC rule files: every same-signal clearance (the SMD-SMD and SMD-pad rules, same-layer via
+  spacing) is at or under the smallest different-signal one (0.1 mm), so Fusion's plausibility
+  prompt no longer blocks DRC. `edit_design_rules` lowers them the same way and says so.
+  Rebuilding the rule files keeps their layer ids, so a rebuild only changes real values.
+
+### Fixes before release
+- Lengths count via barrels (the depth between the layers each via joins), so a pair where one
+  side changes layer reports its real skew. `route_pair(group=)` honours the group's `measure`
+  and `follow_series` and no longer counts old copper of a re-routed pair; between-pair tuning
+  lands on the target instead of overshooting by half the skew.
+- Neck-down works after rounded tuning (arcs no longer stop it).
+- `set_length_group(preset=)` picks exact names first, so DDR4 and HDMI can be chosen.
+- `size_for_current` sizes for the net's full current and warns about parts rated below it;
+  only parts in the current path count (not TVS diodes or decoupling caps). Vias are checked
+  per layer change, at 0.8 A per via by default (IPC-2221 on a 0.3 mm barrel, 25 um plating).
+  PoE Type 4 is sized for 0.96 A.
+- `tidy_placement` leaves parts alone when a trace ends anywhere on their pads, keeps P/N pair
+  groups together, keeps `place_inline` alignment, skips locked parts, and re-checks after its
+  last pass.
+- A write is not sent when Fusion did not answer the DRC before it. DRC after writes runs only
+  for board writes and puts the schematic editor back. The shared lock stays held until a
+  request that timed out has really finished, and multi-step tools hold it throughout.
+- Per-design data (length groups, net currents) is saved atomically under the shared lock, in
+  a file named by a hash of the design, so similar names no longer share data.
+- Fusion's built-in server: a write is never re-run because its own output contained "not
+  initialized"; the whole chain of stdout wrappers is repaired.
+- `open_design` matches the folder as well as the name of an already-open design.
+- Hardening: rule files are written only to the rules folder, the temp folder, Downloads or
+  Documents; the add-in allows AUTO SAVE / LOAD only for files in the temp folder (add-in 0.14.2);
+  previews go to the per-user data folder; the autorouter's temp folder is removed after a run;
+  part ratings are saved atomically under the shared lock.
 
 
 ## 0.2.0 (2026-10-04)

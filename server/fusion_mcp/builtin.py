@@ -57,8 +57,9 @@ def _femcp_repair_streams(_sys):
         _top = getattr(_sys, _name, None)
         if type(_top).__name__ != "_NsSanitizedWriter":
             continue
-        _cur, _depth = _top, 0
+        _chain, _cur, _depth = [], _top, 0
         while type(_cur).__name__ == "_NsSanitizedWriter" and _depth < 100000:
+            _chain.append(_cur)
             _nxt = vars(_cur).get("_original")
             if _nxt is None:
                 _nxt = getattr(_sys, "__" + _name + "__", None)
@@ -66,8 +67,11 @@ def _femcp_repair_streams(_sys):
                     import io
                     _nxt = io.StringIO()
             _cur, _depth = _nxt, _depth + 1
-        if _depth > 1 or vars(_top).get("_original") is not _cur:
-            vars(_top)["_original"] = _cur
+        # every layer, not just the top: a runner that unwraps one level later puts an inner
+        # wrapper back as sys.stdout, and its own _original link must not lead into the old chain
+        for _layer in _chain:
+            if vars(_layer).get("_original") is not _cur:
+                vars(_layer)["_original"] = _cur
 
 
 import sys as _femcp_sys
@@ -120,6 +124,16 @@ def run(_context: str):
         res = {{"ok": False, "error": {{"code": ex.code, "message": str(ex)}}}}{end}
     print({MARK!r} + json.dumps(res, default=str))
 '''
+
+
+def _session_lost(resp) -> bool:
+    """Fusion's server says our MCP session is gone. Only the protocol error counts: the
+    script's own output (in the result) may contain any text, and a write whose output said
+    "not initialized" was otherwise sent twice."""
+    err = (resp or {}).get("error") if isinstance(resp, dict) else None
+    if not isinstance(err, dict):
+        return False
+    return _NO_SESSION in str(err.get("message") or "").lower()
 
 
 class BuiltinClient:
@@ -180,13 +194,24 @@ class BuiltinClient:
 
     def call(self, op: str, args: dict, timeout: float) -> dict:
         """Run one add-in operation; returns the add-in's {'ok', 'result' | 'error'}."""
+        started = time.monotonic()
         if not self._lock.acquire(timeout=timeout):
             raise BuiltinError("fusion_busy", f"a previous operation was still running in Fusion after {timeout:.0f}s; "
                                "retry once it finishes")
         try:
-            return self._call(op, args, timeout)
+            # the wait for the previous call counts against this call's timeout, so the
+            # worst case stays `timeout`, not twice it
+            left = timeout - (time.monotonic() - started)
+            if left <= 1.0:
+                raise BuiltinError("fusion_busy", f"a previous operation kept Fusion busy for {timeout:.0f}s; "
+                                   "retry once it finishes")
+            return self._call(op, args, left)
+        except BuiltinError as ex:
+            if ex.code not in ("fusion_busy", "fusion_error", "fusion_stdout_corrupt"):
+                self.session, self._checked = None, None     # a protocol problem: start a fresh MCP session
+            raise
         except Exception:
-            # whatever went wrong, start the next call with a fresh MCP session
+            # transport or protocol failure (timeouts, HTTP errors, bad JSON): fresh MCP session next time
             self.session, self._checked = None, None
             raise
         finally:
@@ -211,7 +236,7 @@ class BuiltinClient:
                     self.session = None
                     continue
                 raise
-            if attempt == 1 and _NO_SESSION in json.dumps(resp or {}):
+            if attempt == 1 and _session_lost(resp):
                 self.session = None                          # "Session not initialized. Call 'initialize' first."
                 continue
             break

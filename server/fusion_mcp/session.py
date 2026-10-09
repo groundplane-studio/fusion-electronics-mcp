@@ -18,7 +18,7 @@ from fusion_offline import design as D
 from fusion_offline import drc as DRC
 from fusion_offline import eagle
 
-from .bridge import Bridge, BridgeOpError, describe
+from .bridge import Bridge, BridgeOpError, BridgeUnavailable, describe
 from .fusion_lock import FusionBusy
 
 
@@ -97,11 +97,20 @@ class Session:
     def errors(self, kind: str) -> dict:
         return self.bridge.call("errors", {"kind": kind})
 
-    def drc_errors(self) -> list[dict]:
+    def drc_errors(self, restore_editor: bool = True) -> list[dict]:
         """Run Fusion's DRC on the board and return its errors (DRC is never grouped into an undo
-        step; its window is not a question, so dialogs are not treated as failures)."""
-        self.run("DRC;", "board", check_dialogs=False)
-        return self.errors("board").get("errors", [])
+        step; its window is not a question, so dialogs are not treated as failures). DRC needs the
+        board editor: with restore_editor, the schematic editor is brought back if it was active.
+        The run and the read of its errors hold the shared lock together."""
+        lock = getattr(self.bridge, "lock", None)
+        with (lock.hold("drc") if lock else contextlib.nullcontext()):
+            prev = (self.context() or {}).get("active_editor") if restore_editor else None
+            self.run("DRC;", "board", check_dialogs=False)
+            errs = self.errors("board").get("errors", [])
+            if prev == "schematic":
+                with contextlib.suppress(BridgeOpError):
+                    self.activate(prev)
+            return errs
 
     @staticmethod
     def with_grid(commands: str) -> str:
@@ -168,14 +177,21 @@ class Session:
         before = self.snapshot(board, schematic)
         if design:
             self.require_design(design)
-        # DRC before and after (bridge.drc_after_writes): the reply says what the write broke
+        # DRC before and after (bridge.drc_after_writes): the reply says what the write broke. Only
+        # for board-editor writes: DRC runs in the board editor, so a schematic write would end in it
         drc_before, drc_note = None, ""
-        if board and before.board_xml is not None and getattr(self.bridge, "drc_after_writes", False):
+        if (editor == "board" and board and before.board_xml is not None
+                and getattr(self.bridge, "drc_after_writes", False)):
             h = hash(before.board_xml)
             try:
-                drc_before = (self._drc_cache[1] if self._drc_cache and self._drc_cache[0] == h
-                              else self.drc_errors())
-            except Exception as ex:                           # never let DRC block a write
+                if self._drc_cache and self._drc_cache[0] == h:
+                    drc_before = self._drc_cache[1]
+                else:
+                    drc_before = self.drc_errors(restore_editor=False)
+                    self._drc_cache = (h, drc_before)
+            except BridgeUnavailable as ex:                 # Fusion busy or gone: do not send the write
+                raise BridgeUnavailable(f"{ex} (while running DRC before the write; nothing was written)") from None
+            except Exception as ex:                         # a DRC problem of its own never blocks a write
                 drc_note = f"; DRC not run ({ex})"
             if design:
                 self.require_design(design)                   # DRC took a moment: check again
@@ -196,11 +212,14 @@ class Session:
         note = ("; Fusion showed " + "; ".join(describe(d) for d in shown)) if shown else ""
         if messages:
             note += "; Fusion said: " + " | ".join(messages)
+        after_drc = None
         if ok and not unexpected and drc_before is not None:
             try:
-                errs = self.drc_errors()
-                d = DRC.diff(drc_before, errs)
-                self._drc_cache = (hash(after.board_xml), errs) if after.board_xml is not None else None
+                errs = self.drc_errors(restore_editor=False)
+                # an existing error without a signature moves with the part it is on: pair those up
+                # (same type, layer) instead of counting them as new
+                d = DRC.diff(drc_before, errs, pair_moved=True)
+                after_drc = errs
                 self.last_drc = d
                 drc_note = "; " + DRC.line(d)
                 if d["new_copper"] and getattr(self.bridge, "undo_on_new_drc", False):
@@ -208,17 +227,22 @@ class Session:
             except Exception as ex:
                 drc_note = f"; DRC not run after the write ({ex})"
         if ok and not unexpected:
+            if after_drc is not None and after.board_xml is not None:
+                self._drc_cache = (hash(after.board_xml), after_drc)
+            elif after.board_xml != before.board_xml:
+                self._drc_cache = None
             return after, detail + drc_note + note
-        self._drc_cache = None
         changed = after.board_xml != before.board_xml or after.sch_xml != before.sch_xml
         if changed:
             self.undo(editor)
             restored = self.snapshot(board, schematic)
             clean = restored.board_xml == before.board_xml and restored.sch_xml == before.sch_xml
+            if restored.board_xml != before.board_xml:
+                self._drc_cache = None          # the board is not as it was: its DRC must run again
             how = "The change was undone" + ("" if clean else
                   " (warning: the design does not exactly match its state before this call; check it)")
         else:
-            how = "Nothing was changed"
+            how = "Nothing was changed"         # the board is unchanged, so its cached DRC still holds
         reason = detail if not ok else "an unexpected dialog appeared"
         raise WriteFailed(f"{reason}{note}. {how}. Commands sent: {commands}")
 

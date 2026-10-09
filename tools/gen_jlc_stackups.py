@@ -43,9 +43,9 @@ RULES = {
     "rlMinPadTop": "0.18mm", "rlMinPadInner": "0.18mm", "rlMinPadBottom": "0.18mm",
     # via ring 0.1 mm + 0.1 mm wire-to-via meets via hole to track 0.2 mm (0.3 mm drill -> 0.5 mm via)
     "rlMinViaOuter": "0.1mm", "rlMinViaInner": "0.1mm",
-    # same-signal via spacing may not exceed the different-signal one (mdViaVia 0.12 mm), or
+    # same-signal via spacing may not exceed the smallest different-signal clearance (0.1 mm), or
     # Fusion's DRC stops on a plausibility warning before it runs
-    "mdViaViaSameLayer": "0.12mm",
+    "mdViaViaSameLayer": "0.1mm",
 }
 
 
@@ -54,6 +54,29 @@ def apply_rules(text: str) -> str:
         text, n = re.subn(rf'(<param name="{name}" value=")[^"]*(")', rf"\g<1>{value}\g<2>", text)
         if n != 1:
             raise ValueError(f"rule {name} found {n} times")
+    return clamp_same_signal_text(text)
+
+
+def clamp_same_signal_text(text: str) -> str:
+    """Lower same-signal clearances (md* params and the built-in samesignal rules) to the smallest
+    different-signal one, as edit_design_rules does, editing only those values in the text."""
+    import xml.etree.ElementTree as ET
+    sys.path.insert(0, os.path.join(ROOT, "offline"))
+    from fusion_offline import rules_edit as RE
+    root = ET.fromstring(text.encode("utf-8"))
+    before = {p.get("name"): p.get("value") for p in root.iter("param")}
+    rules_before = {r.get("name"): dict(r.attrib) for r in root.iter("rule")}
+    RE.clamp_same_signal(root)
+    for p in root.iter("param"):
+        if p.get("value") != before.get(p.get("name")):
+            text = re.sub(rf'(<param name="{re.escape(p.get("name"))}" value=")[^"]*(")',
+                          lambda m, v=p.get("value"): m.group(1) + v + m.group(2), text)
+    for r in root.iter("rule"):
+        old = rules_before.get(r.get("name"), {})
+        for attr in ("value", "preferredvalue"):
+            if r.get(attr) != old.get(attr):
+                text = re.sub(rf'(<rule [^>]*name="{re.escape(r.get("name"))}"[^>]*)', lambda m, a=attr, v=r.get(attr):
+                              re.sub(rf'( {a}=")[^"]*(")', lambda q: q.group(1) + v + q.group(2), m.group(1)), text)
     return text
 
 

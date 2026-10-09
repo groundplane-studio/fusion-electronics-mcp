@@ -157,13 +157,19 @@ class Bridge:
             if dialogs.give_back_focus(prev_fg, pid):
                 guard["returned"], guard["dialogs"] = True, len(self.last_dialogs)
         if mode == "builtin":
-            box: dict = {}
+            box: dict = {"done": False, "pinned": False}
+            handoff = threading.Lock()
 
             def work():
                 try:
                     box["res"] = self._builtin_call(op, args or {}, timeout + 20)
                 except BaseException as ex:          # surfaced on this thread
                     box["exc"] = ex
+                finally:
+                    with handoff:
+                        box["done"] = True
+                        if box["pinned"]:            # the caller gave up: the lock was left to us
+                            self.lock.unpin()
             th = threading.Thread(target=work, daemon=True)
             th.start()
             started = time.monotonic()
@@ -173,8 +179,14 @@ class Bridge:
                     if not th.is_alive():
                         break
                     if time.monotonic() > deadline:
+                        # Fusion is still working on it: keep the lock held until the worker
+                        # finishes, so no session sends work to a busy Fusion
+                        with handoff:
+                            if not box["done"] and hasattr(self.lock, "pin"):
+                                box["pinned"] = self.lock.pin()
                         raise BridgeUnavailable(f"No answer from Fusion within {timeout + 20:.0f}s; "
-                                                "a dialog may be open in Fusion that needs a person to close it.")
+                                                "a dialog may be open in Fusion that needs a person to close it. "
+                                                "Fusion may still be running the call: the next call waits for it.")
                     if watch and time.monotonic() - started > POLL_S:
                         self._dismiss_dialogs(pid, answers or [], forms or [])
                     keep_focus()

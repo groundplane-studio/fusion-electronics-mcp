@@ -34,7 +34,7 @@ import uuid
 import adsk.core  # type: ignore
 import adsk.electron  # type: ignore
 
-ADDIN_VERSION = "0.14.0"
+ADDIN_VERSION = "0.14.2"
 PROTOCOL = 1
 EVENT_ID = "fusion_electronics_mcp_bridge"
 DEFAULT_TIMEOUT = 60.0
@@ -95,6 +95,22 @@ def split_commands(text):
     return out
 
 
+_AUTO_FILE = re.compile(r"^\s*AUTO\s+(SAVE|LOAD)\b\s*(.*?)\s*;?\s*$", re.I)
+
+
+def _auto_file_ok(cmd):
+    """AUTO SAVE / LOAD read and write autorouter files: only under the system temp folder."""
+    m = _AUTO_FILE.match(cmd)
+    if not m:
+        return True
+    path = m.group(2).strip().strip("'\"")
+    if not path:
+        return False
+    tmp = os.path.realpath(tempfile.gettempdir())
+    real = os.path.realpath(path)
+    return real.startswith(tmp + os.sep)
+
+
 def validate(text):
     cmds = []
     for line in text.splitlines():
@@ -108,6 +124,8 @@ def validate(text):
             raise BridgeError("command_not_allowed", f"EAGLE command {verb!r} is not allowed by the bridge")
         if verb == "EDIT" and not _EDIT_OK.match(c):
             raise BridgeError("command_not_allowed", "EDIT is only allowed for library .pac/.sym/.dev objects")
+        if verb == "AUTO" and not _auto_file_ok(c):
+            raise BridgeError("command_not_allowed", "AUTO SAVE / LOAD is only allowed for files in the temp folder")
     return cmds
 
 
@@ -534,6 +552,24 @@ def op_find_documents(args):
     return {"hub": hub.name, "projects": [hub.dataProjects.item(i).name for i in range(hub.dataProjects.count)]}
 
 
+def _norm_folder(path):
+    return "/".join(p for p in str(path or "").replace("\\", "/").split("/") if p)
+
+
+def _doc_folder(d):
+    """A document's folder in its project as 'A/B' ('' for the top folder), or None when Fusion
+    does not say (an unsaved document, or one without a data file)."""
+    try:
+        node = d.dataFile.parentFolder
+        parts = []
+        while node is not None and not getattr(node, "isRoot", False):
+            parts.append(node.name)
+            node = node.parentFolder
+        return "/".join(reversed(parts))
+    except Exception:
+        return None
+
+
 def op_open_design(args):
     """Bring a design (or library) forward, opening it from the project only when none of its
     documents is open. Fusion froze on 2026-10-07 during open_design while another design had
@@ -548,6 +584,23 @@ def op_open_design(args):
     kinds = ("library",) if ext == "flbr" else ("design", "board", "schematic")
     mine = sorted((d for d in _docs() if d.name == name and _kind_of(d) in kinds),
                   key=lambda d: kinds.index(_kind_of(d)))
+    if mine:
+        # a same-named design can be open from another folder: match the folder when one is given,
+        # and refuse to guess when the name alone is ambiguous
+        where = {id(d): _doc_folder(d) for d in mine}
+        known = sorted({f for f in where.values() if f is not None})
+        if folder is not None:
+            want = _norm_folder(folder)
+            hits = [d for d in mine if where[id(d)] == want]
+            if not hits and any(f is None for f in where.values()):
+                raise BridgeError("ambiguous", f"{name!r} is open but Fusion does not say which folder it is in, so "
+                                  f"it cannot be matched to folder {folder!r}. Switch to it in Fusion by hand, or "
+                                  "close it first.")
+            mine = hits
+        elif len(known) > 1:
+            raise BridgeError("ambiguous", f"{name!r} is open from more than one folder ("
+                              + ", ".join(repr(f or "top folder") for f in known)
+                              + "); pass folder= to say which one")
     if mine:                                   # already open: bring it forward, never open it again
         if not mine[0].isActive:
             mine[0].activate()

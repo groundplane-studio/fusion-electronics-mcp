@@ -61,9 +61,9 @@ class CheckTest(unittest.TestCase):
         self.assertTrue(CU.check(vin_board(0.2, pour=True), {"VIN": {"a": 1.0}}, self.COPPER)[0]["ok"])
 
     def test_vias_against_current(self):
-        res = CU.check(vin_board(1.6, vias=1), {"VIN": {"a": 2.0}}, self.COPPER)[0]
-        self.assertIn("1 via(s) for 2.0 A: about 2 needed", res["problems"][0])
-        self.assertTrue(CU.check(vin_board(1.6, vias=2), {"VIN": {"a": 2.0}}, self.COPPER)[0]["ok"])
+        res = CU.check(vin_board(1.6, vias=1), {"VIN": {"a": 2.0}}, self.COPPER, 1.0)[0]
+        self.assertIn("1 of 1 layer change(s) have too few vias for 2.0 A: about 2 needed at each", res["problems"][0])
+        self.assertTrue(CU.check(vin_board(1.6, vias=2), {"VIN": {"a": 2.0}}, self.COPPER, 1.0)[0]["ok"])
 
 
 class ToolTest(unittest.TestCase):
@@ -96,13 +96,15 @@ class ToolTest(unittest.TestCase):
         S.set_net_current({"VIN": 0})
         self.assertIn("no currents saved", S.check_current()["note"])
 
-    def test_weakest_part_sets_the_current(self):
-        # PoE: the standard allows far more, but the magnetics are rated 350 mA
+    def test_weak_part_is_a_warning_not_a_smaller_width(self):
+        # PoE: the standard allows far more, but the magnetics are rated 350 mA; the copper is
+        # still sized for the net's 0.96 A
         S.set_net_current({"VIN": 0.96})
         S.set_part_rating("G2415S", 0.35, "https://example.com/g2415s.pdf", "802.3af only")
         size = S.size_for_current()["nets"]["VIN"]
-        self.assertEqual(size["current_a"], 0.35)
-        self.assertIn("T1 (G2415S) is rated 0.35 A, below the 0.96 A", size["limited_by"])
+        self.assertEqual(size["current_a"], 0.96)
+        self.assertNotIn("limited_by", size)
+        self.assertIn("T1 (G2415S) is rated 0.35 A on a 0.96 A net", size["warnings"][0])
         self.assertEqual(size["rated_parts"][0]["ref"], "T1")
         chk = S.check_current()["nets"][0]
         self.assertIn("T1 (G2415S) is rated 0.35 A, below the 0.96 A this net carries", chk["problems"][-1])
@@ -112,7 +114,7 @@ class ToolTest(unittest.TestCase):
 
     def test_reference_currents(self):
         poe = S.current_ratings("PoE")["rows"]
-        self.assertEqual([r["current_a"] for r in poe], [0.35, 0.6, 0.6, 0.866])
+        self.assertEqual([r["current_a"] for r in poe], [0.35, 0.6, 0.6, 0.96])
         self.assertTrue(all(r["source"]["url"].startswith("https://") for r in poe))
         usb = {r["interface"]: r["current_a"] for r in S.current_ratings("USB")["rows"]}
         self.assertEqual(usb["USB 2.0 default (VBUS)"], 0.5)

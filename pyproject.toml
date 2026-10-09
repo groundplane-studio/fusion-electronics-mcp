@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fusion-electronics-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server that lets AI agents read and edit Autodesk Fusion Electronics designs"
 readme = "README.md"
 license = "MIT"
