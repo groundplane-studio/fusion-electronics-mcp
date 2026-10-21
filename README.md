@@ -29,9 +29,11 @@ GND stitched, silkscreen and 3D models checked.*
 
 - **Review**: board and schematic summaries, parts, nets, DRC and ERC, a
   schematic review (unconnected power pins, boxes drawn as nets, stray wires,
-  nets that need labels), and a picture of the board (`render_board`).
+  nets that need labels), a picture of the board (`render_board`), and
+  annular rings of every via and through-hole pad (`check_annular_ring`).
 - **Signal integrity**: differential pairs, length matching, and impedance
-  estimates (IPC-2141 closed form) against the design's real layer stackup.
+  estimates (IPC-2141 closed form) against the design's real layer stackup;
+  same-layer pour too close to 50 ohm and USB traces (`check_pour_clearance`).
 - **Schematic capture**: place parts, connect pins (labels added
   automatically), rename nets or single segments, add sheets with your frame.
   Draw a whole schematic from a KiCad board as reviewable blocks: each IC or
@@ -82,7 +84,7 @@ GND stitched, silkscreen and 3D models checked.*
   against the design (every layer, the outline, every drilled hole, paste and
   mask on every SMD pad).
 
-`fusion-electronics-mcp tools` lists all 100 tools.
+`fusion-electronics-mcp tools` lists all 102 tools.
 
 ## Requirements
 

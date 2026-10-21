@@ -687,6 +687,105 @@ def check_current(nets: list[str] | None = None, via_current_a: float = 0.8) -> 
             "not_routed": [r["net"] for r in res if r["ok"] is None], "nets": res}
 
 
+
+@tool(READ)
+def check_annular_ring(min_ring_mm: float = 0.15, sizes: list[list[float]] | None = None) -> dict:
+    """Vias and through-hole pads whose annular ring is too small. The ring is copper diameter
+    minus drill (radial ring, half that, is reported too); it must be at least min_ring_mm and
+    scale up with the drill through `sizes` ([[drill, diameter], ...] in mm, default 0.20/0.35,
+    0.25/0.43, 0.30/0.55, 0.35/0.70: interpolated between sizes, the ratio below the smallest
+    drill, the largest size's ring above it). Copper per layer is what Fusion makes: the larger
+    of the pad/via diameter and the restring rule (rv * drill within rlMin..rlMax), with pads on
+    inner layers sized by the restring alone. Grouped by size, with where each failing one is and
+    whether a via sits in an SMD pad (via-in-pad)."""
+    from fusion_offline import annular as AR
+    table = {float(d): float(c) for d, c in sizes} if sizes else None
+    if min_ring_mm <= 0 or (table and any(c <= d for d, c in table.items())):
+        raise ValueError("min_ring_mm must be positive, and each size's diameter larger than its drill")
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    return {"design": session.active_design(), **AR.check(root, min_ring_mm, table)}
+
+
+@tool(READ)
+def check_pour_clearance(nets: list[str] | None = None, classes: str = r"(?i)50\s*_?ohm|usb",
+                         pairs: str = r"(?i)usb", w_factor: float = 3.0, h_factor: float = 2.0,
+                         min_gap_mm: float | None = None, stackup_file: str | None = None) -> dict:
+    """Same-layer pour copper too close to controlled-impedance traces drawn as plain (non-coplanar)
+    microstrip/stripline: nearby pour lowers their impedance. Checks the nets given, or by default
+    every net in a class whose name matches `classes` (the 50 ohm and USB classes) and both nets
+    of each differential pair (si.find_diff_pairs) whose name matches `pairs`. Required gap per
+    segment: max(w_factor * width, h_factor * H), H the thinner dielectric next to the layer from
+    the stackup (3W keeps side-coupling to a few percent; 2H covers thick dielectrics where 3W is
+    not enough); min_gap_mm sets one fixed gap instead. Uses the poured copper from Fusion's working
+    copy (as last saved), else estimates from the pour outlines. Trace within the gap of the net's
+    own pads and vias (the breakout) is skipped and its length reported."""
+    import re
+    from fusion_offline import pour_clearance as PCL, si as SI, stackup as ST, placement_check as PC
+    if w_factor < 0 or h_factor < 0 or (min_gap_mm is not None and min_gap_mm <= 0):
+        raise ValueError("w_factor and h_factor must not be negative, min_gap_mm must be positive")
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    bd = D.parse_board_design(root)
+    if nets:
+        missing = [n for n in nets if n not in bd.signals]
+        if missing:
+            raise KeyError(f"no net(s) {', '.join(missing)}")
+        want = list(nets)
+    else:
+        cre, pre = re.compile(classes), re.compile(pairs)
+        want = {n for n, sg in bd.signals.items() if cre.search(sg.net_class or "")}
+        want |= {n for pr in SI.find_diff_pairs(bd) if any(pre.search(x) for x in pr) for n in pr}
+        want = sorted(want)
+    if not want:
+        return {"design": session.active_design(), "ok": None, "nets": [],
+                "note": f"no nets in classes matching {classes!r} or pairs matching {pairs!r}; pass nets"}
+    notes = []
+    st, fill, fill_note = None, None, ""
+    if stackup_file:
+        st, note = _stackup(stackup_file)
+        if note:
+            notes.append(note)
+    try:
+        dr = session.bridge.call("design_rules", timeout=60)
+        with open(dr["path"], "rb") as f:
+            v2 = D.read_xml(f.read())
+        st = st or ST.parse_stackup(dr["xml"])
+        if st is not None:
+            raw = PCL.fills(v2)
+            if raw:
+                fill = PCL.remap(raw, [l.number for l in st.copper], bd.copper_layers)
+                fill_note = (f"poured copper from Fusion's working copy ({dr.get('modified')}): the fill as last "
+                             "saved; save the design (or re-pour) after moving copper")
+    except (BridgeOpError, BridgeUnavailable, OSError, KeyError) as ex:
+        notes.append(f"working copy not readable ({ex}): gaps estimated from the pour outlines")
+    if fill is None:
+        fill_note = ("no poured copper available: gaps estimated from the pour outlines (inside a solid "
+                     "outline the trace gets the larger of the pour's isolate and the wire clearance)")
+    heights = PCL.reference_heights(st, bd.copper_layers) if st is not None else {}
+    if not heights and min_gap_mm is None:
+        notes.append("no stackup that matches the board's copper layers: the required gap is w_factor x width only")
+    reach = {}
+    for p in PC.pads(root):
+        if p.net in want:
+            b = p.bbox
+            reach.setdefault(p.net, []).append((p.x, p.y, max(b[2] - b[0], b[3] - b[1]) / 2))
+    for n in want:
+        for v in bd.signals[n].vias:
+            reach.setdefault(n, []).append((v.x, v.y, (v.diameter or v.drill * 1.5) / 2))
+    res = PCL.check(root, want, fill, heights, w_factor, h_factor, min_gap_mm,
+                    clearance_mm=_mm_param(bd.rules.get("mdWireWire")), pad_reach=reach)
+    for v in res["violations"]:
+        v["layer_name"] = bd.layers.get(v["layer"], str(v["layer"]))
+    return {"design": session.active_design(), "ok": res["ok"], "nets": want,
+            "rule": (f"{min_gap_mm:g} mm" if min_gap_mm is not None
+                     else f"max({w_factor:g} x trace width, {h_factor:g} x H to the nearest reference plane)"),
+            "heights": {bd.layers.get(k, str(k)): v for k, v in heights.items()},
+            "fill": fill_note, **({"notes": notes} if notes else {}), **res}
+
+
+def _mm_param(v: str | None) -> float:
+    from fusion_offline.stitch import _mm
+    return _mm(v, 0.0)
+
 def _class_advice(name: str, cw: float, outer: float, inner: dict) -> str:
     """Judge a class width against the outer layers, where class-width traces run, with inner
     layers as a separate note; never advise narrowing the class."""

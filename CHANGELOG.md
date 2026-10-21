@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Checks
+- `check_annular_ring`: vias and through-hole pads whose copper diameter minus
+  drill is under 0.15 mm, scaled up with the drill through the sizes
+  0.35/0.20, 0.43/0.25, 0.55/0.30, 0.70/0.35 mm (`min_ring_mm`, `sizes`).
+  Copper per layer as Fusion makes it (restring rules, the useDiameter bits;
+  inner-layer pads sized by restring alone); radial ring reported too;
+  vias in SMD pads are marked.
+- `check_pour_clearance`: same-layer pour copper closer to controlled-impedance
+  traces (classes matching 50 ohm / USB, USB diff pairs) than
+  max(3 x width, 2 x H to the nearest reference plane), with the pour net,
+  layer, gap and where. Uses the poured copper from Fusion's working copy (as
+  last saved), else estimates from the pour outlines; breakouts at the net's
+  own pads and vias are skipped and reported.
+
 ## 0.3.0 (2026-10-09)
 
 From laying out the PoE Magnetics Test Board (RJ45, magnetics, CM4) in
