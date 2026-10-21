@@ -782,6 +782,30 @@ def check_pour_clearance(nets: list[str] | None = None, classes: str = r"(?i)50\
             "fill": fill_note, **({"notes": notes} if notes else {}), **res}
 
 
+
+@tool(READ)
+def check_solder_mask(min_dam_mm: float = 0.10, stop_frame_mm: float | None = None,
+                      parts: list[str] | None = None) -> dict:
+    """Pads whose solder mask openings overlap (merge into one) or leave a mask dam between them
+    thinner than min_dam_mm (JLC: 0.10 mm green, 0.13 mm black/white, 0.20 mm on 2 oz). Openings
+    are the pad copper grown by the board's stop frame (mvStopFrame x the pad's smaller dimension,
+    within mlMinStopFrame..mlMaxStopFrame); pads with no mask opening are skipped, vias are tented
+    below mlViaStopLimit. Pads on the same part count (BGA balls, QFN pins). Only pads of two
+    different nets are problems; same-net and unconnected pairs are counted. stop_frame_mm tries
+    one expansion for every pad instead, to see what a smaller frame in the design rules would fix.
+    Grouped by part pair, worst dam first, merged openings counted."""
+    from fusion_offline import solder_mask as SM
+    if min_dam_mm < 0 or (stop_frame_mm is not None and stop_frame_mm < 0):
+        raise ValueError("min_dam_mm and stop_frame_mm must not be negative")
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    res = SM.check(root, min_dam_mm, parts, stop_frame_mm=stop_frame_mm)
+    merged = [p for p in res["problems"] if p["merged"]]
+    thin = [p for p in res["problems"] if not p["merged"]]
+    return {"design": session.active_design(), "ok": res["ok"], "min_dam_mm": min_dam_mm,
+            "stop_frames_mm": res["stop_frames_mm"], "pairs": res["pairs"], "merged_pairs": res["merged"],
+            "merged": merged, "thin_dams": thin,
+            "same_net_pairs": sum(res["same_net_pairs"].values()), "unconnected_pairs": res["unconnected_pairs"]}
+
 def _mm_param(v: str | None) -> float:
     from fusion_offline.stitch import _mm
     return _mm(v, 0.0)

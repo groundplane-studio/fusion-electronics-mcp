@@ -30,7 +30,8 @@ GND stitched, silkscreen and 3D models checked.*
 - **Review**: board and schematic summaries, parts, nets, DRC and ERC, a
   schematic review (unconnected power pins, boxes drawn as nets, stray wires,
   nets that need labels), a picture of the board (`render_board`), and
-  annular rings of every via and through-hole pad (`check_annular_ring`).
+  annular rings of every via and through-hole pad (`check_annular_ring`), and
+  solder mask openings that merge or leave too thin a dam (`check_solder_mask`).
 - **Signal integrity**: differential pairs, length matching, and impedance
   estimates (IPC-2141 closed form) against the design's real layer stackup;
   same-layer pour too close to 50 ohm and USB traces (`check_pour_clearance`).
@@ -84,7 +85,7 @@ GND stitched, silkscreen and 3D models checked.*
   against the design (every layer, the outline, every drilled hole, paste and
   mask on every SMD pad).
 
-`fusion-electronics-mcp tools` lists all 102 tools.
+`fusion-electronics-mcp tools` lists all 103 tools.
 
 ## Requirements
 

@@ -15,6 +15,11 @@
   layer, gap and where. Uses the poured copper from Fusion's working copy (as
   last saved), else estimates from the pour outlines; breakouts at the net's
   own pads and vias are skipped and reported.
+- `check_solder_mask`: pads (same part included: BGA balls, QFN pins) whose
+  mask openings merge or leave a dam under 0.10 mm (JLC green; 0.13 black or
+  white), with the openings grown by the board's stop frame; `stop_frame_mm`
+  shows what a smaller frame would fix. Same-net and unconnected pairs are
+  counted, not flagged.
 
 ## 0.3.0 (2026-10-09)
 
