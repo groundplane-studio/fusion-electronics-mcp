@@ -2920,7 +2920,8 @@ def clean_vias(net: str = "GND") -> dict:
 @tool(ADDITIVE)
 def attach_3d_model(package: str, step_path: str, offset_mm: list[float] | None = None,
                     rotation_deg: list[float] | None = None, folder: str = "3D Packages",
-                    name: str | None = None, allow_below_board: bool = False) -> dict:
+                    name: str | None = None, allow_below_board: bool = False,
+                    accept_crash_risk: bool = False) -> dict:
     """Give a package in the OPEN library a 3D model from a STEP file. The model is placed in the
     footprint's frame (KiCad library models need no offset; pass offset_mm [x, y, z] and
     rotation_deg [rx, ry, rz] when a model's origin differs), saved as a 3D package document in
@@ -2933,7 +2934,11 @@ def attach_3d_model(package: str, step_path: str, offset_mm: list[float] | None 
     If the package already has a 3D model, the new model's file gets a versioned name
     (<package>_V2, ...) so the files in `folder` stay distinguishable. Boards that already use the
     package keep their old model until refreshed: save the library (save_design), then on each
-    board run update_from_libraries(refresh_parts=[one part per device]) and push_3d."""
+    board run update_from_libraries(refresh_parts=[one part per device]) and push_3d.
+
+    Refused on Fusion builds known to crash in Create 3D Package (see CRASHING_3D_BUILDS) unless
+    accept_crash_risk=true: save the library first, since a crash loses unsaved library edits."""
+    _check_3d_build(accept_crash_risk)
     if name is None:
         name = _next_3d_name(package)
     res = session.bridge.call("create_package3d", {"package": package, "step_path": step_path,
@@ -2956,6 +2961,25 @@ def attach_3d_model(package: str, step_path: str, offset_mm: list[float] | None 
     if not linked or (name and name not in linked and res["package"] not in linked):
         raise WriteFailed(f"the 3D package was created but is not linked to {package}: {res}")
     return {"ok": True, **res, "next": "save_design; then on each board update_from_libraries(refresh_parts=[...]) and push_3d"}
+
+
+# Fusion builds that crash in Electronics' Create 3D Package (the command attach_3d_model drives,
+# and the same one in the UI). 2706.1.14 (2026-10): heap corruption (0xc0000374) in
+# Na::Package3DCreateCommand -> OpenNewPackage3DDocumentForEditing -> OGS
+# TextureEffectAttribute::imageSerializer, before any STEP is read; it crashed on every attempt,
+# from the add-in and from the UI, taking unsaved library edits with it.
+CRASHING_3D_BUILDS = {"2706.1.14": "Create 3D Package crashes Fusion (heap corruption in the 3D scene setup)"}
+
+
+def _check_3d_build(accept_crash_risk: bool) -> None:
+    try:
+        ver = str(session.bridge.call("ping", {}, timeout=15).get("fusion_version") or "")
+    except Exception:
+        return
+    hit = next((why for b, why in CRASHING_3D_BUILDS.items() if ver.startswith(b)), None)
+    if hit and not accept_crash_risk:
+        raise ValueError(f"Fusion {ver}: {hit}. Not attaching a 3D model; save the library and attach it "
+                         "by hand, update Fusion, or pass accept_crash_risk=true after saving")
 
 
 def _next_3d_name(package: str) -> str | None:
@@ -3766,6 +3790,97 @@ def insert_library_part(part_id: str) -> dict:
         raise WriteFailed(f"pin-pad connections are {got_conn}, expected {want_conn}")
     return {"ok": True, "device": part.device_name, "pads": len(pads), "holes": got_hole,
             "next": "save_design, then close_library, then add_part"}
+
+
+@tool(READ)
+def get_library_deviceset(name: str) -> dict:
+    """One device set in the Fusion library open in the library editor: its gates and their
+    symbol pins, and every package variant with its package, pin-pad connects ('G$1.PIN' ->
+    'pad pad') and technologies with their attributes (DEFAULT is the '' technology)."""
+    from .library import deviceset_info
+    session.activate("library")
+    info = deviceset_info(D.read_xml(session.export("library")), name)
+    if info is None:
+        raise ValueError(f"no device set {name!r} in the open library")
+    return info
+
+
+@tool(ADDITIVE)
+def add_library_variant(part_id: str, deviceset: str, variant: str, pin_map: dict[str, str] | None = None,
+                        technologies: dict[str, dict[str, str]] | None = None, dnp_technology: bool = False) -> dict:
+    """Add a library part's footprint to an EXISTING device set in the open Fusion library as a
+    new package variant (e.g. a second USB-C connector under CONN_USBC_24P), using the device
+    set's own symbol: no symbol or device set is created. The package is drawn unless the
+    library already has it with the same pads.
+
+    pin_map maps each symbol pin ('VBUS' or 'G$1.VBUS') to its pads ('A4 A9 B4 B9'); by default
+    the part's own pins are matched to the symbol's pins by name (create the part with pin_names
+    that use the symbol's pin names). Every symbol pin must be connected.
+    technologies maps technology name ('' is DEFAULT) to its exact attributes; by default the
+    part's attributes (JLCPCB, MF, MP, VALUE). dnp_technology=true adds a '_DNP' technology with
+    the same attributes and VALUE 'NC/<value>'. Verified by re-reading the library; nothing is
+    saved (call save_design when it looks right)."""
+    from .library import deviceset_info, variant_script
+    part = library.get(part_id)
+    session.activate("library")
+    root = D.read_xml(session.export("library"))
+    info = deviceset_info(root, deviceset)
+    if info is None:
+        raise ValueError(f"no device set {deviceset!r} in the open library")
+    connects, technologies = plan_variant(part, info, variant, pin_map, technologies, dnp_technology)
+    up = lambda v: (v or "").upper()
+    have = next((e for e in root.iter("package") if up(e.get("name")) == up(part.data["package"]["name"])), None)
+    if have is not None and not same_package(have, part.data["package"]):
+        raise ValueError(f"package {part.data['package']['name']} is already in this library with different "
+                         "pads; rename this part's package")
+    session.run_script(variant_script(part, deviceset, variant, connects, technologies,
+                                      reuse_package=have is not None), "library")
+    after = deviceset_info(D.read_xml(session.export("library")), deviceset)
+    got = next((v for v in after["variants"] if up(v["variant"]) == up(variant)), None)
+    if got is None:
+        raise WriteFailed(f"variant {variant!r} was not created in {deviceset}")
+    norm = lambda m: {k: sorted(v.split()) for k, v in m.items()}
+    if norm(got["connects"]) != norm(connects):
+        raise WriteFailed(f"pin-pad connections are {got['connects']}, expected {connects}")
+    if got["technologies"] != technologies:
+        raise WriteFailed(f"technologies are {got['technologies']}, expected {technologies}")
+    return {"ok": True, "deviceset": info["deviceset"], "variant": variant, "package": got["package"],
+            "package_reused": have is not None, "connects": got["connects"], "technologies": got["technologies"],
+            "next": "save_design (no 3D model is attached)"}
+
+
+def plan_variant(part, info: dict, variant: str, pin_map: dict[str, str] | None,
+                 technologies: dict[str, dict[str, str]] | None, dnp_technology: bool) -> tuple[dict, dict]:
+    """(connects 'GATE.PIN' -> 'pads', technologies) for add_library_variant, checked against the
+    device set's symbol pins and the part's pads; raises ValueError on any mismatch."""
+    up = lambda v: (v or "").upper()
+    if any(up(v["variant"]) == up(variant) for v in info["variants"]):
+        raise ValueError(f"{info['deviceset']} already has a variant {variant!r}")
+    gate_pins = [f"{g['name']}.{p}" for g in info["gates"] for p in g["pins"]]
+    gate_of = {p.split(".", 1)[1]: p for p in gate_pins}
+    if pin_map is None:
+        pin_map = {p["name"]: p["pad"] for p in part.data["symbol"]["pins"]}
+    connects, unknown = {}, []
+    for pin, pads in pin_map.items():
+        key = pin if pin in gate_pins else gate_of.get(pin)
+        if key is None:
+            unknown.append(pin)
+        else:
+            connects[key] = " ".join(str(pads).split())
+    missing = [p for p in gate_pins if p not in connects]
+    if unknown or missing:
+        raise ValueError(f"pin_map does not fit {info['deviceset']}'s symbol: not symbol pins {unknown}, "
+                         f"unconnected symbol pins {missing} (symbol pins: {gate_pins})")
+    pkg = part.data["package"]
+    pkg_pads = {s["name"] for s in pkg.get("smds", []) + pkg.get("pads", [])}
+    bad = sorted({pd for pads in connects.values() for pd in pads.split()} - pkg_pads)
+    if bad:
+        raise ValueError(f"pads {bad} are not in package {pkg['name']}")
+    techs = {t: {k: str(v) for k, v in a.items()}
+             for t, a in (technologies or {"": dict(part.data.get("attributes", {}))}).items()}
+    if dnp_technology and "_DNP" not in techs:
+        techs["_DNP"] = {**techs.get("", {}), "VALUE": "NC/" + techs.get("", {}).get("VALUE", "")}
+    return connects, techs
 
 
 @tool(CHANGE)

@@ -6,8 +6,11 @@ points down, EAGLE Y points up, so y' = -y and rotations negate; the visual
 orientation is unchanged, so EasyEDA-derived footprints stay JLC-native.
 
 - smd pads -> package.smds (roundrect ratio -> roundness %)
-- thru_hole pads -> package.pads (rect -> square, else round)
-- np_thru_hole pads -> package.holes
+- thru_hole pads -> package.pads (rect -> square, else round); an oval drill
+  (`(drill oval W H)`, a plated slot) -> a "slot" pad: drill = slot width,
+  slot_length = slot length, rot = the slot's long axis
+- np_thru_hole pads -> package.holes; an oval drill (an unplated slot, e.g. a
+  connector's locating slot) -> package.slots, milled on layer 46
 - F.SilkS lines -> package.silk
 - F.SilkS filled polygons and circles (KiCad's pin-1 triangle and dot) ->
   package.silk_polys / package.silk_circles
@@ -48,6 +51,16 @@ def _r(v: float) -> float:
     return round(v + 0.0, 4)
 
 
+def _oval_drill(drill) -> tuple[float, float] | None:
+    """(width along the pad's x, height along its y) of `(drill oval W H)`, else None.
+    KiCad also writes `(drill oval W)` for a round hole; that is not a slot."""
+    if drill and len(drill) >= 4 and drill[1] == "oval":
+        w, h = float(drill[2]), float(drill[3])
+        if abs(w - h) > 1e-3:
+            return w, h
+    return None
+
+
 def footprint_to_part(text: str, *, part_id: str, deviceset: str, prefix: str, device: str = "",
                       pin_names: dict[str, str] | None = None, attributes: dict[str, str] | None = None,
                       jlc_native: bool = False, source: str = "", description: str = "",
@@ -56,7 +69,7 @@ def footprint_to_part(text: str, *, part_id: str, deviceset: str, prefix: str, d
     the pad name); pads sharing a pin name are connected to that one pin."""
     fp = sexp(text)
     name = re.sub(r"[^A-Za-z0-9_.-]", "_", str(fp[1]).split(":")[-1])
-    smds, pads, holes, silk = [], [], [], []
+    smds, pads, holes, slots, silk = [], [], [], [], []
     used: set[str] = set()
     unconnected: set[str] = set()
     renames: dict[str, str] = {}
@@ -72,7 +85,16 @@ def footprint_to_part(text: str, *, part_id: str, deviceset: str, prefix: str, d
         w, h = float(size[1]), float(size[2])
         drill = _one(p, "drill")
         dval = float(drill[-1]) if drill and len(drill) > 1 else None
-        if kind == "np_thru_hole" or (kind == "thru_hole" and dval and max(w, h) <= dval + 1e-3):
+        oval = _oval_drill(drill)
+        if oval:
+            # the slot's long axis in EAGLE degrees: the pad's rotation, plus 90 when the
+            # drill is taller than wide in the pad's own frame
+            slot_w, slot_l = min(oval), max(oval)
+            axis = (rot + (90 if oval[1] > oval[0] else 0)) % 180
+        if kind == "np_thru_hole" and oval:
+            slots.append({"x": _r(x), "y": _r(y), "width": _r(slot_w), "length": _r(slot_l), "rot": axis})
+            continue
+        if kind == "np_thru_hole" or (kind == "thru_hole" and dval and not oval and max(w, h) <= dval + 1e-3):
             # a "plated" pad no bigger than its drill has no copper ring: a
             # locating-peg hole (EasyEDA exports RJ45 pegs this way)
             holes.append({"x": _r(x), "y": _r(y), "drill": dval or w})
@@ -96,6 +118,13 @@ def footprint_to_part(text: str, *, part_id: str, deviceset: str, prefix: str, d
             rr = _one(p, "roundrect_rratio")
             smds.append({"name": num, "x": _r(x), "y": _r(y), "dx": _r(w), "dy": _r(h),
                          "roundness": int(round(float(rr[1]) * 200)) if rr else 0, "rot": rot})
+        elif oval:
+            # a plated slot: Fusion's SLOT pad is `diameter` wide around a slot_length x drill
+            # slot (copper length = slot_length + diameter - drill). Verified on 2706.1.14:
+            # PAD <d> SLOT R<a>, then CHANGE SLOTLENGTH <l> at the pad
+            pads.append({"name": num, "x": _r(x), "y": _r(y), "drill": _r(slot_w),
+                         "diameter": _r(min(w, h)), "shape": "slot", "slot_length": _r(slot_l),
+                         "rot": axis, "kicad_size": [_r(w), _r(h)]})
         else:
             if shape in ("oval", "roundrect") and abs(w - h) > 1e-3 and max(w, h) / min(w, h) < 1.6:
                 # a near-round oval (Mini-Fit's 2.7 x 3.3) as a LONG pad would be
@@ -158,8 +187,8 @@ def footprint_to_part(text: str, *, part_id: str, deviceset: str, prefix: str, d
     part = {
         "id": part_id, "deviceset": deviceset, "device": device, "description": description,
         "prefix": prefix, "user_value": user_value,
-        "package": {"name": name, "smds": smds, "pads": pads, "holes": holes, "silk": silk, "silk_polys": silk_polys, "silk_circles": silk_circles,
-                    "jlc_native": jlc_native},
+        "package": {"name": name, "smds": smds, "pads": pads, "holes": holes, "slots": slots, "silk": silk,
+                    "silk_polys": silk_polys, "silk_circles": silk_circles, "jlc_native": jlc_native},
         "symbol": {"name": deviceset, "pins": pins},
         "attributes": attributes or {},
         "metadata": {"source": source or f"kicad:{fp[1]}", "maintainer": "", "verified": False,

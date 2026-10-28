@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+From the WarpKVM boards in October 2026: board checks for annular ring, pour
+clearance and solder mask, and USB-C board-to-board connectors (G-Switch
+GT-USB-7052 / GT-USB-9818A) added to a shared library.
+
 ### Checks
 - `check_annular_ring`: vias and through-hole pads whose copper diameter minus
   drill is under 0.15 mm, scaled up with the drill through the sizes
@@ -20,6 +24,24 @@
   white), with the openings grown by the board's stop frame; `stop_frame_mm`
   shows what a smaller frame would fix. Same-net and unconnected pairs are
   counted, not flagged.
+
+### Library
+- `add_library_variant`: add a part's footprint to an EXISTING device set as
+  a new package variant on its own symbol (no symbol or device set made).
+  Pins map to the symbol by name or an explicit `pin_map`; every symbol pin
+  must be connected; exact attributes per technology, `dnp_technology` adds
+  `_DNP` with `NC/<value>`. Fusion's automatic empty `PACKAGE` attribute is
+  deleted. Verified by re-reading the library.
+- `get_library_deviceset`: a device set's gates and pins, and every variant's
+  package, connects and technology attributes.
+- KiCad footprints: `(drill oval W H)` on a plated pad becomes a Fusion SLOT
+  pad (`PAD <d> SLOT`, then `CHANGE SLOTLENGTH`); on an unplated pad it is a
+  slot milled on layer 46 (it used to become a round hole the slot's width).
+- New packages' `>NAME` / `>VALUE`: 0.8128 mm vector, ratio 8 %, bottom-left,
+  `>NAME` above `>VALUE` at the footprint's top-left.
+- `attach_3d_model` refuses on Fusion builds that crash in Create 3D Package
+  (2706.1.14: heap corruption in the 3D scene setup, from the UI too) unless
+  `accept_crash_risk=true`.
 
 ## 0.3.0 (2026-10-09)
 

@@ -85,7 +85,7 @@ GND stitched, silkscreen and 3D models checked.*
   against the design (every layer, the outline, every drilled hole, paste and
   mask on every SMD pad).
 
-`fusion-electronics-mcp tools` lists all 103 tools.
+`fusion-electronics-mcp tools` lists all 106 tools.
 
 ## Requirements
 
@@ -184,7 +184,19 @@ component library folder and builds them into a Fusion library of yours:
 4. Open your library in Fusion and have the agent run `insert_library_part`,
    `save_design`, then `attach_3d_model` with the part's STEP file. A model
    that would sit upside down is refused.
+   To add the footprint to a device set you already have instead (another
+   connector under your `CONN_USBC_24P`, say), run `add_library_variant`: it
+   draws only the package and adds it as a new variant on the existing
+   symbol, with the attributes you give each technology (`dnp_technology`
+   adds a `_DNP` one with `NC/` on the value). `get_library_deviceset` shows
+   a device set's pins, variants and attributes first.
 5. Close the library (`close_library`) and place the part with `add_part`.
+
+Footprints keep plated slots (`(drill oval ...)` becomes a Fusion slot pad)
+and unplated slots (milled on layer 46). `>NAME` / `>VALUE` are 0.8128 mm,
+vector, ratio 8 %, bottom-left, above the footprint's top-left corner.
+Fusion 2706.1.14 crashes in Create 3D Package, so `attach_3d_model` refuses
+on that build unless `accept_crash_risk=true`: save the library first.
 
 Part definitions live in `%LOCALAPPDATA%\fusion-electronics-mcp\library\parts`
 on Windows (`FUSION_MCP_LIBRARY` to change), so you can keep them in git.

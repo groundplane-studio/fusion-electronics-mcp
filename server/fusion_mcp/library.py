@@ -22,6 +22,10 @@ from . import data_dir
 # the parts come from the separate library repository
 DEFAULT_DIR = data_dir("library", "parts")
 MARKER_LAYER = 114
+MILLING_LAYER = 46
+# >NAME / >VALUE in new packages: vector font, ratio 8 %, bottom-left aligned, >NAME stacked
+# above >VALUE above the top-left corner of the footprint (Groundplane library style)
+TEXT_STYLE = {"size": 0.8128, "ratio": 8, "font": "VECTOR", "align": "BOTTOM LEFT", "gap": 0.25}
 
 
 @dataclass
@@ -113,11 +117,21 @@ def _package_commands(pkg: dict) -> list:
                  f"{q(s['name'])} ({n(s['x'])} {n(s['y'])});")
     for p in pkg.get("pads", []):
         L.append(f"CHANGE DRILL {n(p['drill'])};")
-        shape = {"square": "SQUARE", "long": "LONG", "octagon": "OCTAGON"}.get(p.get("shape"), "ROUND")
+        shape = {"square": "SQUARE", "long": "LONG", "octagon": "OCTAGON", "slot": "SLOT"}.get(p.get("shape"), "ROUND")
         L.append(f"PAD {n(p['diameter'])} {shape} R{n(p.get('rot', 0))} "
                  f"{q(p['name'])} ({n(p['x'])} {n(p['y'])});")
+        if shape == "SLOT":
+            # a new SLOT pad is 1.27 mm long; CHANGE SLOTLENGTH at the pad sets the drill slot's
+            # length (verified on 2706.1.14; `CHANGE LENGTH` is symbol-editor only)
+            L.append(f"CHANGE SLOTLENGTH {n(p['slot_length'])} ({n(p['x'])} {n(p['y'])});")
     for h in pkg.get("holes", []):
         L.append(f"HOLE {n(h['drill'])} ({n(h['x'])} {n(h['y'])});")
+    if pkg.get("slots"):
+        # unplated slots (a connector's locating slot): a closed outline on the Milling layer,
+        # the way Groundplane's library draws them (fabs route layer 46 as a non-plated cut)
+        L.append(f"LAYER {MILLING_LAYER};")
+        for s in pkg["slots"]:
+            L += [f"WIRE 0 {a} {b};" for a, b in _stadium(s)]
     if pkg.get("silk"):
         L.append("LAYER 21;")
         for x1, y1, x2, y2 in pkg["silk"]:
@@ -134,12 +148,97 @@ def _package_commands(pkg: dict) -> list:
         for c in pkg.get("silk_circles", []):
             w = 0 if c.get("filled") else 0.12      # CIRCLE width 0 draws a filled disc
             L.append(f"CIRCLE {n(w)} ({n(c['x'])} {n(c['y'])}) ({n(c['x'] + c['r'])} {n(c['y'])});")
-    ys = [s["y"] for s in pkg.get("smds", []) + pkg.get("pads", [])] or [0]
-    L += ["CHANGE SIZE 0.8;", "LAYER 25;", f"TEXT '>NAME' R0 (-1 {n(max(ys) + 1.2)});",
-          "LAYER 27;", f"TEXT '>VALUE' R0 (-1 {n(min(ys) - 1.8)})"+";"]
+    x0, top = _top_left(pkg)
+    t = TEXT_STYLE
+    L += [f"CHANGE FONT {t['font']};", f"CHANGE RATIO {t['ratio']};", f"CHANGE SIZE {n(t['size'])};",
+          f"CHANGE ALIGN {t['align']};",
+          "LAYER 25;", f"TEXT '>NAME' R0 ({n(x0)} {n(top + 2 * t['gap'] + t['size'])});",
+          "LAYER 27;", f"TEXT '>VALUE' R0 ({n(x0)} {n(top + t['gap'])});"]
     if pkg.get("jlc_native"):
         L += [f"LAYER {MARKER_LAYER} JLC_FOOTPRINT;", "CHANGE SIZE 0.6;", "TEXT 'JLC' R0 (0 0);"]
     return L
+
+
+def _top_left(pkg: dict) -> tuple[float, float]:
+    """Leftmost x and topmost y of the package's copper, holes and silk."""
+    xs, ys = [], []
+    for s in pkg.get("smds", []):
+        h = max(float(s["dx"]), float(s["dy"])) / 2
+        xs.append(float(s["x"]) - h)
+        ys.append(float(s["y"]) + h)
+    for p in pkg.get("pads", []):
+        h = (float(p["diameter"]) + float(p.get("slot_length", 0) or 0)) / 2
+        xs.append(float(p["x"]) - h)
+        ys.append(float(p["y"]) + h)
+    for h in pkg.get("holes", []):
+        xs.append(float(h["x"]) - float(h["drill"]) / 2)
+        ys.append(float(h["y"]) + float(h["drill"]) / 2)
+    for s in pkg.get("slots", []):
+        xs.append(float(s["x"]) - float(s["length"]) / 2)
+        ys.append(float(s["y"]) + float(s["length"]) / 2)
+    for x1, y1, x2, y2 in pkg.get("silk", []):
+        xs += [float(x1), float(x2)]
+        ys += [float(y1), float(y2)]
+    return (min(xs) if xs else 0.0), (max(ys) if ys else 0.0)
+
+
+def _stadium(slot: dict) -> list[tuple[str, str]]:
+    """The outline of a width x length slot (rounded ends) as four WIRE segments, each a pair of
+    EAGLE points; the ends are 180-degree arcs (`-180`, clockwise)."""
+    import math
+    a = math.radians(float(slot.get("rot", 0)))
+    ux, uy = math.cos(a), math.sin(a)                 # along the slot
+    nx, ny = -uy, ux                                  # across it
+    r = float(slot["width"]) / 2
+    h = max(float(slot["length"]) / 2 - r, 0.0)
+    cx, cy = float(slot["x"]), float(slot["y"])
+    pt = lambda s, t: f"({n(cx + s * ux + t * nx)} {n(cy + s * uy + t * ny)})"
+    p1, p2, p3, p4 = pt(h, r), pt(h, -r), pt(-h, -r), pt(-h, r)
+    return [(p4, p1), (p1, f"-180 {p2}"), (p2, p3), (p3, f"-180 {p4}")]
+
+
+def variant_script(part: Part, deviceset: str, variant: str, connects: dict[str, str],
+                   technologies: dict[str, dict[str, str]], reuse_package: bool = False) -> str:
+    """Add the part's package to an EXISTING device set as a new package variant: no symbol is
+    drawn, the device set's own gate pins are connected (connects: 'G$1.PIN' -> 'pad pad ...'),
+    and each technology gets exactly the given attributes. Verified on 2706.1.14: Fusion gives a
+    variant made by PACKAGE an empty PACKAGE attribute in every technology; it is deleted unless
+    asked for (ATTRIBUTE <name> DELETE)."""
+    pkg = part.data["package"]
+    L = ["GRID MM;"]
+    if not reuse_package:
+        L += _package_commands(pkg)
+    L += [f"EDIT {q(deviceset + '.dev')};", f"PACKAGE {q(pkg['name'])} {q(variant)};"]
+    # ONE CONNECT per pin, all its pads in one string (a second CONNECT replaces the first)
+    L += [f"CONNECT {q(pin)} {q(' '.join(str(pads).split()))};" for pin, pads in connects.items()]
+    clean = lambda v: str(v).replace("'", "").replace(";", ",")
+    for tech, attrs in technologies.items():
+        L.append(f"TECHNOLOGY {q(tech) if tech else chr(39) * 2};")
+        for k, v in attrs.items():
+            L.append(f"ATTRIBUTE {k} {q(clean(v)) if v else chr(39) * 2};")
+        if "PACKAGE" not in attrs:
+            L.append("ATTRIBUTE PACKAGE DELETE;")
+    return "\n".join(L) + "\n"
+
+
+def deviceset_info(root, name: str) -> dict | None:
+    """A device set from an exported library: gates and their symbol pins, and every package
+    variant with its package, pin-pad connects and technologies (with attributes)."""
+    up = lambda v: (v or "").upper()
+    ds = next((d for d in root.iter("deviceset") if up(d.get("name")) == up(name)), None)
+    if ds is None:
+        return None
+    syms = {s.get("name"): [p.get("name") for p in s.iter("pin")] for s in root.iter("symbol")}
+    gates = [{"name": g.get("name"), "symbol": g.get("symbol"), "pins": syms.get(g.get("symbol"), [])}
+             for g in ds.iter("gate")]
+    variants = []
+    for d in ds.iter("device"):
+        variants.append({
+            "variant": d.get("name") or "", "package": d.get("package"),
+            "connects": {f"{c.get('gate')}.{c.get('pin')}": c.get("pad") for c in d.iter("connect")},
+            "technologies": {t.get("name") or "": {a.get("name"): a.get("value") or "" for a in t.iter("attribute")}
+                             for t in d.iter("technology")}})
+    return {"deviceset": ds.get("name"), "prefix": ds.get("prefix"), "gates": gates, "variants": variants}
 
 
 def _symbol_and_device(L: list, d: dict, sym: dict, pkg: dict) -> str:
