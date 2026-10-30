@@ -687,6 +687,129 @@ def check_current(nets: list[str] | None = None, via_current_a: float = 0.8) -> 
             "not_routed": [r["net"] for r in res if r["ok"] is None], "nets": res}
 
 
+
+@tool(READ)
+def check_annular_ring(min_ring_mm: float = 0.15, sizes: list[list[float]] | None = None) -> dict:
+    """Vias and through-hole pads whose annular ring is too small. The ring is copper diameter
+    minus drill (radial ring, half that, is reported too); it must be at least min_ring_mm and
+    scale up with the drill through `sizes` ([[drill, diameter], ...] in mm, default 0.20/0.35,
+    0.25/0.43, 0.30/0.55, 0.35/0.70: interpolated between sizes, the ratio below the smallest
+    drill, the largest size's ring above it). Copper per layer is what Fusion makes: the larger
+    of the pad/via diameter and the restring rule (rv * drill within rlMin..rlMax), with pads on
+    inner layers sized by the restring alone. Grouped by size, with where each failing one is and
+    whether a via sits in an SMD pad (via-in-pad)."""
+    from fusion_offline import annular as AR
+    table = {float(d): float(c) for d, c in sizes} if sizes else None
+    if min_ring_mm <= 0 or (table and any(c <= d for d, c in table.items())):
+        raise ValueError("min_ring_mm must be positive, and each size's diameter larger than its drill")
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    return {"design": session.active_design(), **AR.check(root, min_ring_mm, table)}
+
+
+@tool(READ)
+def check_pour_clearance(nets: list[str] | None = None, classes: str = r"(?i)50\s*_?ohm|usb",
+                         pairs: str = r"(?i)usb", w_factor: float = 3.0, h_factor: float = 2.0,
+                         min_gap_mm: float | None = None, stackup_file: str | None = None) -> dict:
+    """Same-layer pour copper too close to controlled-impedance traces drawn as plain (non-coplanar)
+    microstrip/stripline: nearby pour lowers their impedance. Checks the nets given, or by default
+    every net in a class whose name matches `classes` (the 50 ohm and USB classes) and both nets
+    of each differential pair (si.find_diff_pairs) whose name matches `pairs`. Required gap per
+    segment: max(w_factor * width, h_factor * H), H the thinner dielectric next to the layer from
+    the stackup (3W keeps side-coupling to a few percent; 2H covers thick dielectrics where 3W is
+    not enough); min_gap_mm sets one fixed gap instead. Uses the poured copper from Fusion's working
+    copy (as last saved), else estimates from the pour outlines. Trace within the gap of the net's
+    own pads and vias (the breakout) is skipped and its length reported."""
+    import re
+    from fusion_offline import pour_clearance as PCL, si as SI, stackup as ST, placement_check as PC
+    if w_factor < 0 or h_factor < 0 or (min_gap_mm is not None and min_gap_mm <= 0):
+        raise ValueError("w_factor and h_factor must not be negative, min_gap_mm must be positive")
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    bd = D.parse_board_design(root)
+    if nets:
+        missing = [n for n in nets if n not in bd.signals]
+        if missing:
+            raise KeyError(f"no net(s) {', '.join(missing)}")
+        want = list(nets)
+    else:
+        cre, pre = re.compile(classes), re.compile(pairs)
+        want = {n for n, sg in bd.signals.items() if cre.search(sg.net_class or "")}
+        want |= {n for pr in SI.find_diff_pairs(bd) if any(pre.search(x) for x in pr) for n in pr}
+        want = sorted(want)
+    if not want:
+        return {"design": session.active_design(), "ok": None, "nets": [],
+                "note": f"no nets in classes matching {classes!r} or pairs matching {pairs!r}; pass nets"}
+    notes = []
+    st, fill, fill_note = None, None, ""
+    if stackup_file:
+        st, note = _stackup(stackup_file)
+        if note:
+            notes.append(note)
+    try:
+        dr = session.bridge.call("design_rules", timeout=60)
+        with open(dr["path"], "rb") as f:
+            v2 = D.read_xml(f.read())
+        st = st or ST.parse_stackup(dr["xml"])
+        if st is not None:
+            raw = PCL.fills(v2)
+            if raw:
+                fill = PCL.remap(raw, [l.number for l in st.copper], bd.copper_layers)
+                fill_note = (f"poured copper from Fusion's working copy ({dr.get('modified')}): the fill as last "
+                             "saved; save the design (or re-pour) after moving copper")
+    except (BridgeOpError, BridgeUnavailable, OSError, KeyError) as ex:
+        notes.append(f"working copy not readable ({ex}): gaps estimated from the pour outlines")
+    if fill is None:
+        fill_note = ("no poured copper available: gaps estimated from the pour outlines (inside a solid "
+                     "outline the trace gets the larger of the pour's isolate and the wire clearance)")
+    heights = PCL.reference_heights(st, bd.copper_layers) if st is not None else {}
+    if not heights and min_gap_mm is None:
+        notes.append("no stackup that matches the board's copper layers: the required gap is w_factor x width only")
+    reach = {}
+    for p in PC.pads(root):
+        if p.net in want:
+            b = p.bbox
+            reach.setdefault(p.net, []).append((p.x, p.y, max(b[2] - b[0], b[3] - b[1]) / 2))
+    for n in want:
+        for v in bd.signals[n].vias:
+            reach.setdefault(n, []).append((v.x, v.y, (v.diameter or v.drill * 1.5) / 2))
+    res = PCL.check(root, want, fill, heights, w_factor, h_factor, min_gap_mm,
+                    clearance_mm=_mm_param(bd.rules.get("mdWireWire")), pad_reach=reach)
+    for v in res["violations"]:
+        v["layer_name"] = bd.layers.get(v["layer"], str(v["layer"]))
+    return {"design": session.active_design(), "ok": res["ok"], "nets": want,
+            "rule": (f"{min_gap_mm:g} mm" if min_gap_mm is not None
+                     else f"max({w_factor:g} x trace width, {h_factor:g} x H to the nearest reference plane)"),
+            "heights": {bd.layers.get(k, str(k)): v for k, v in heights.items()},
+            "fill": fill_note, **({"notes": notes} if notes else {}), **res}
+
+
+
+@tool(READ)
+def check_solder_mask(min_dam_mm: float = 0.10, stop_frame_mm: float | None = None,
+                      parts: list[str] | None = None) -> dict:
+    """Pads whose solder mask openings overlap (merge into one) or leave a mask dam between them
+    thinner than min_dam_mm (JLC: 0.10 mm green, 0.13 mm black/white, 0.20 mm on 2 oz). Openings
+    are the pad copper grown by the board's stop frame (mvStopFrame x the pad's smaller dimension,
+    within mlMinStopFrame..mlMaxStopFrame); pads with no mask opening are skipped, vias are tented
+    below mlViaStopLimit. Pads on the same part count (BGA balls, QFN pins). Only pads of two
+    different nets are problems; same-net and unconnected pairs are counted. stop_frame_mm tries
+    one expansion for every pad instead, to see what a smaller frame in the design rules would fix.
+    Grouped by part pair, worst dam first, merged openings counted."""
+    from fusion_offline import solder_mask as SM
+    if min_dam_mm < 0 or (stop_frame_mm is not None and stop_frame_mm < 0):
+        raise ValueError("min_dam_mm and stop_frame_mm must not be negative")
+    root = D.read_xml(_snap(schematic=False).board_xml)
+    res = SM.check(root, min_dam_mm, parts, stop_frame_mm=stop_frame_mm)
+    merged = [p for p in res["problems"] if p["merged"]]
+    thin = [p for p in res["problems"] if not p["merged"]]
+    return {"design": session.active_design(), "ok": res["ok"], "min_dam_mm": min_dam_mm,
+            "stop_frames_mm": res["stop_frames_mm"], "pairs": res["pairs"], "merged_pairs": res["merged"],
+            "merged": merged, "thin_dams": thin,
+            "same_net_pairs": sum(res["same_net_pairs"].values()), "unconnected_pairs": res["unconnected_pairs"]}
+
+def _mm_param(v: str | None) -> float:
+    from fusion_offline.stitch import _mm
+    return _mm(v, 0.0)
+
 def _class_advice(name: str, cw: float, outer: float, inner: dict) -> str:
     """Judge a class width against the outer layers, where class-width traces run, with inner
     layers as a separate note; never advise narrowing the class."""
@@ -2797,7 +2920,8 @@ def clean_vias(net: str = "GND") -> dict:
 @tool(ADDITIVE)
 def attach_3d_model(package: str, step_path: str, offset_mm: list[float] | None = None,
                     rotation_deg: list[float] | None = None, folder: str = "3D Packages",
-                    name: str | None = None, allow_below_board: bool = False) -> dict:
+                    name: str | None = None, allow_below_board: bool = False,
+                    accept_crash_risk: bool = False) -> dict:
     """Give a package in the OPEN library a 3D model from a STEP file. The model is placed in the
     footprint's frame (KiCad library models need no offset; pass offset_mm [x, y, z] and
     rotation_deg [rx, ry, rz] when a model's origin differs), saved as a 3D package document in
@@ -2810,7 +2934,11 @@ def attach_3d_model(package: str, step_path: str, offset_mm: list[float] | None 
     If the package already has a 3D model, the new model's file gets a versioned name
     (<package>_V2, ...) so the files in `folder` stay distinguishable. Boards that already use the
     package keep their old model until refreshed: save the library (save_design), then on each
-    board run update_from_libraries(refresh_parts=[one part per device]) and push_3d."""
+    board run update_from_libraries(refresh_parts=[one part per device]) and push_3d.
+
+    Refused on Fusion builds known to crash in Create 3D Package (see CRASHING_3D_BUILDS) unless
+    accept_crash_risk=true: save the library first, since a crash loses unsaved library edits."""
+    _check_3d_build(accept_crash_risk)
     if name is None:
         name = _next_3d_name(package)
     res = session.bridge.call("create_package3d", {"package": package, "step_path": step_path,
@@ -2833,6 +2961,25 @@ def attach_3d_model(package: str, step_path: str, offset_mm: list[float] | None 
     if not linked or (name and name not in linked and res["package"] not in linked):
         raise WriteFailed(f"the 3D package was created but is not linked to {package}: {res}")
     return {"ok": True, **res, "next": "save_design; then on each board update_from_libraries(refresh_parts=[...]) and push_3d"}
+
+
+# Fusion builds that crash in Electronics' Create 3D Package (the command attach_3d_model drives,
+# and the same one in the UI). 2706.1.14 (2026-10): heap corruption (0xc0000374) in
+# Na::Package3DCreateCommand -> OpenNewPackage3DDocumentForEditing -> OGS
+# TextureEffectAttribute::imageSerializer, before any STEP is read; it crashed on every attempt,
+# from the add-in and from the UI, taking unsaved library edits with it.
+CRASHING_3D_BUILDS = {"2706.1.14": "Create 3D Package crashes Fusion (heap corruption in the 3D scene setup)"}
+
+
+def _check_3d_build(accept_crash_risk: bool) -> None:
+    try:
+        ver = str(session.bridge.call("ping", {}, timeout=15).get("fusion_version") or "")
+    except Exception:
+        return
+    hit = next((why for b, why in CRASHING_3D_BUILDS.items() if ver.startswith(b)), None)
+    if hit and not accept_crash_risk:
+        raise ValueError(f"Fusion {ver}: {hit}. Not attaching a 3D model; save the library and attach it "
+                         "by hand, update Fusion, or pass accept_crash_risk=true after saving")
 
 
 def _next_3d_name(package: str) -> str | None:
@@ -3643,6 +3790,97 @@ def insert_library_part(part_id: str) -> dict:
         raise WriteFailed(f"pin-pad connections are {got_conn}, expected {want_conn}")
     return {"ok": True, "device": part.device_name, "pads": len(pads), "holes": got_hole,
             "next": "save_design, then close_library, then add_part"}
+
+
+@tool(READ)
+def get_library_deviceset(name: str) -> dict:
+    """One device set in the Fusion library open in the library editor: its gates and their
+    symbol pins, and every package variant with its package, pin-pad connects ('G$1.PIN' ->
+    'pad pad') and technologies with their attributes (DEFAULT is the '' technology)."""
+    from .library import deviceset_info
+    session.activate("library")
+    info = deviceset_info(D.read_xml(session.export("library")), name)
+    if info is None:
+        raise ValueError(f"no device set {name!r} in the open library")
+    return info
+
+
+@tool(ADDITIVE)
+def add_library_variant(part_id: str, deviceset: str, variant: str, pin_map: dict[str, str] | None = None,
+                        technologies: dict[str, dict[str, str]] | None = None, dnp_technology: bool = False) -> dict:
+    """Add a library part's footprint to an EXISTING device set in the open Fusion library as a
+    new package variant (e.g. a second USB-C connector under CONN_USBC_24P), using the device
+    set's own symbol: no symbol or device set is created. The package is drawn unless the
+    library already has it with the same pads.
+
+    pin_map maps each symbol pin ('VBUS' or 'G$1.VBUS') to its pads ('A4 A9 B4 B9'); by default
+    the part's own pins are matched to the symbol's pins by name (create the part with pin_names
+    that use the symbol's pin names). Every symbol pin must be connected.
+    technologies maps technology name ('' is DEFAULT) to its exact attributes; by default the
+    part's attributes (JLCPCB, MF, MP, VALUE). dnp_technology=true adds a '_DNP' technology with
+    the same attributes and VALUE 'NC/<value>'. Verified by re-reading the library; nothing is
+    saved (call save_design when it looks right)."""
+    from .library import deviceset_info, variant_script
+    part = library.get(part_id)
+    session.activate("library")
+    root = D.read_xml(session.export("library"))
+    info = deviceset_info(root, deviceset)
+    if info is None:
+        raise ValueError(f"no device set {deviceset!r} in the open library")
+    connects, technologies = plan_variant(part, info, variant, pin_map, technologies, dnp_technology)
+    up = lambda v: (v or "").upper()
+    have = next((e for e in root.iter("package") if up(e.get("name")) == up(part.data["package"]["name"])), None)
+    if have is not None and not same_package(have, part.data["package"]):
+        raise ValueError(f"package {part.data['package']['name']} is already in this library with different "
+                         "pads; rename this part's package")
+    session.run_script(variant_script(part, deviceset, variant, connects, technologies,
+                                      reuse_package=have is not None), "library")
+    after = deviceset_info(D.read_xml(session.export("library")), deviceset)
+    got = next((v for v in after["variants"] if up(v["variant"]) == up(variant)), None)
+    if got is None:
+        raise WriteFailed(f"variant {variant!r} was not created in {deviceset}")
+    norm = lambda m: {k: sorted(v.split()) for k, v in m.items()}
+    if norm(got["connects"]) != norm(connects):
+        raise WriteFailed(f"pin-pad connections are {got['connects']}, expected {connects}")
+    if got["technologies"] != technologies:
+        raise WriteFailed(f"technologies are {got['technologies']}, expected {technologies}")
+    return {"ok": True, "deviceset": info["deviceset"], "variant": variant, "package": got["package"],
+            "package_reused": have is not None, "connects": got["connects"], "technologies": got["technologies"],
+            "next": "save_design (no 3D model is attached)"}
+
+
+def plan_variant(part, info: dict, variant: str, pin_map: dict[str, str] | None,
+                 technologies: dict[str, dict[str, str]] | None, dnp_technology: bool) -> tuple[dict, dict]:
+    """(connects 'GATE.PIN' -> 'pads', technologies) for add_library_variant, checked against the
+    device set's symbol pins and the part's pads; raises ValueError on any mismatch."""
+    up = lambda v: (v or "").upper()
+    if any(up(v["variant"]) == up(variant) for v in info["variants"]):
+        raise ValueError(f"{info['deviceset']} already has a variant {variant!r}")
+    gate_pins = [f"{g['name']}.{p}" for g in info["gates"] for p in g["pins"]]
+    gate_of = {p.split(".", 1)[1]: p for p in gate_pins}
+    if pin_map is None:
+        pin_map = {p["name"]: p["pad"] for p in part.data["symbol"]["pins"]}
+    connects, unknown = {}, []
+    for pin, pads in pin_map.items():
+        key = pin if pin in gate_pins else gate_of.get(pin)
+        if key is None:
+            unknown.append(pin)
+        else:
+            connects[key] = " ".join(str(pads).split())
+    missing = [p for p in gate_pins if p not in connects]
+    if unknown or missing:
+        raise ValueError(f"pin_map does not fit {info['deviceset']}'s symbol: not symbol pins {unknown}, "
+                         f"unconnected symbol pins {missing} (symbol pins: {gate_pins})")
+    pkg = part.data["package"]
+    pkg_pads = {s["name"] for s in pkg.get("smds", []) + pkg.get("pads", [])}
+    bad = sorted({pd for pads in connects.values() for pd in pads.split()} - pkg_pads)
+    if bad:
+        raise ValueError(f"pads {bad} are not in package {pkg['name']}")
+    techs = {t: {k: str(v) for k, v in a.items()}
+             for t, a in (technologies or {"": dict(part.data.get("attributes", {}))}).items()}
+    if dnp_technology and "_DNP" not in techs:
+        techs["_DNP"] = {**techs.get("", {}), "VALUE": "NC/" + techs.get("", {}).get("VALUE", "")}
+    return connects, techs
 
 
 @tool(CHANGE)

@@ -29,9 +29,12 @@ GND stitched, silkscreen and 3D models checked.*
 
 - **Review**: board and schematic summaries, parts, nets, DRC and ERC, a
   schematic review (unconnected power pins, boxes drawn as nets, stray wires,
-  nets that need labels), and a picture of the board (`render_board`).
+  nets that need labels), a picture of the board (`render_board`), and
+  annular rings of every via and through-hole pad (`check_annular_ring`), and
+  solder mask openings that merge or leave too thin a dam (`check_solder_mask`).
 - **Signal integrity**: differential pairs, length matching, and impedance
-  estimates (IPC-2141 closed form) against the design's real layer stackup.
+  estimates (IPC-2141 closed form) against the design's real layer stackup;
+  same-layer pour too close to 50 ohm and USB traces (`check_pour_clearance`).
 - **Schematic capture**: place parts, connect pins (labels added
   automatically), rename nets or single segments, add sheets with your frame.
   Draw a whole schematic from a KiCad board as reviewable blocks: each IC or
@@ -82,7 +85,7 @@ GND stitched, silkscreen and 3D models checked.*
   against the design (every layer, the outline, every drilled hole, paste and
   mask on every SMD pad).
 
-`fusion-electronics-mcp tools` lists all 100 tools.
+`fusion-electronics-mcp tools` lists all 106 tools.
 
 ## Requirements
 
@@ -181,7 +184,19 @@ component library folder and builds them into a Fusion library of yours:
 4. Open your library in Fusion and have the agent run `insert_library_part`,
    `save_design`, then `attach_3d_model` with the part's STEP file. A model
    that would sit upside down is refused.
+   To add the footprint to a device set you already have instead (another
+   connector under your `CONN_USBC_24P`, say), run `add_library_variant`: it
+   draws only the package and adds it as a new variant on the existing
+   symbol, with the attributes you give each technology (`dnp_technology`
+   adds a `_DNP` one with `NC/` on the value). `get_library_deviceset` shows
+   a device set's pins, variants and attributes first.
 5. Close the library (`close_library`) and place the part with `add_part`.
+
+Footprints keep plated slots (`(drill oval ...)` becomes a Fusion slot pad)
+and unplated slots (milled on layer 46). `>NAME` / `>VALUE` are 0.8128 mm,
+vector, ratio 8 %, bottom-left, above the footprint's top-left corner.
+Fusion 2706.1.14 crashes in Create 3D Package, so `attach_3d_model` refuses
+on that build unless `accept_crash_risk=true`: save the library first.
 
 Part definitions live in `%LOCALAPPDATA%\fusion-electronics-mcp\library\parts`
 on Windows (`FUSION_MCP_LIBRARY` to change), so you can keep them in git.

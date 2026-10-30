@@ -74,6 +74,8 @@ class Pad:
     y: float
     poly: list
     bbox: tuple
+    size: float = 0.0          # smaller dimension of an SMD, a pad's diameter (sizes the mask opening)
+    stop: bool = True          # has a solder mask opening
 
 
 def pads(root: ET.Element) -> list[Pad]:
@@ -106,7 +108,7 @@ def pads(root: ET.Element) -> list[Pad]:
             side = "bottom" if FP.board_layer(s.get("layer"), mir) == "16" else "top"
             x, y = xf(lx, ly)
             out.append(Pad(ref, s.get("name"), pad_net.get((ref, s.get("name"))), True, frozenset({side}),
-                           x, y, poly, _bbox(poly)))
+                           x, y, poly, _bbox(poly), min(dx, dy), (s.get("stop") or "yes") != "no"))
         for p in pk.iterfind("pad"):
             lx, ly, drill = _f(p, "x"), _f(p, "y"), _f(p, "drill")
             dia = max(_f(p, "diameter"), drill + 2 * _ring(rules, "Pad", drill))
@@ -126,7 +128,7 @@ def pads(root: ET.Element) -> list[Pad]:
             poly = FP.convex_hull([xf(x, y) for x, y in local])
             x, y = xf(lx, ly)
             out.append(Pad(ref, p.get("name"), pad_net.get((ref, p.get("name"))), False,
-                           frozenset({"top", "bottom"}), x, y, poly, _bbox(poly)))
+                           frozenset({"top", "bottom"}), x, y, poly, _bbox(poly), dia, (p.get("stop") or "yes") != "no"))
     return out
 
 

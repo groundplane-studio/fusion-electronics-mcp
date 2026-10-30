@@ -194,7 +194,7 @@ EXPECTED_TOOLS = {
     "set_board_outline", "add_hole", "add_text", "rip_up", "add_pour", "list_pours", "set_pour_thermals", "add_keepout",
     "stitch_vias", "fanout_pad", "clean_vias", "remove_stubs", "autoroute", "routing_status", "render_board",
     "score_placement", "suggest_placement_moves", "import_placement_from_kicad", "import_routing_from_kicad", "route_trace", "route_net", "ground_vias", "route_close", "place_clusters", "lay_bus", "route_remaining", "import_netlist_from_kicad", "undo", "save_design",
-    "search_library", "get_library_part", "insert_library_part", "close_library", "update_from_libraries", "attach_3d_model", "push_3d", "check_3d_models", "list_design_rules", "create_library_part",
+    "search_library", "get_library_part", "insert_library_part", "close_library", "update_from_libraries", "attach_3d_model", "push_3d", "check_3d_models", "list_design_rules", "create_library_part", "add_library_variant", "get_library_deviceset",
     "request_design_review", "get_assembly_quote",
 }
 
